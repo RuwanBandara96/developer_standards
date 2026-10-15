@@ -571,6 +571,306 @@ def s_type_quiz():
 def s_branch_sim():
     header(
         "Git Branch Flow Simulator",
+        "Choose the right branch name, base branch, and PR target — get graded instantly",
+        "SECTION 3",
+    )
+
+    # ---- 1. Convention reference ----
+    st.markdown("#### Branch naming convention")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                ["Feature", "feature/<issue-id>", "feature/1234"],
+                ["Bug fix", "bugfix/<issue-id>", "bugfix/1234"],
+            ],
+            columns=["Branch Type", "Naming Convention", "Example"],
+        ),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    st.markdown("---")
+
+    # ---- 2. Scenario ----
+    st.markdown("### 🎮 Scenario")
+    st.info(
+        "You've just been assigned **issue #4471** — a new loan report. "
+        "Your team uses the standard promotion flow: **Working Branch → DEV → QA**. "
+        "Decide how you'd branch, name it, and open the PR."
+    )
+
+    # ---- 3. Branch landscape ----
+    st.markdown("#### 🗺️ Available branches")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(
+            '<div class="card card-navy" style="text-align:center;padding:12px;">'
+            '<div style="font-weight:800;color:#0B3C5D;font-size:.9rem;">origin/main</div>'
+            '<div style="font-size:.75rem;color:#5A7184;">Production, protected</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            '<div class="card card-gold" style="text-align:center;padding:12px;">'
+            '<div style="font-weight:800;color:#8A6512;font-size:.9rem;">origin/dev</div>'
+            '<div style="font-size:.75rem;color:#5A7184;">Integration (latest)</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            '<div class="card card-navy" style="text-align:center;padding:12px;">'
+            '<div style="font-weight:800;color:#0B3C5D;font-size:.9rem;">origin/qa</div>'
+            '<div style="font-size:.75rem;color:#5A7184;">QA testing</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            '<div class="card card-red" style="text-align:center;padding:12px;">'
+            '<div style="font-weight:800;color:#9B2C2C;font-size:.9rem;">feature/4001</div>'
+            '<div style="font-size:.75rem;color:#5A7184;">Stale local (3 wks)</div>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+    st.markdown("### 🧩 Make your three decisions")
+
+    # ---- 4. Inputs with live feedback ----
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        branch_name = st.text_input(
+            "1️⃣ Branch name",
+            placeholder="e.g. feature/1234",
+            key="bs_name_input",
+            help="Use the convention feature/<issue-id> or bugfix/<issue-id>.",
+        )
+        if branch_name.strip():
+            if branch_name.strip() == "feature/4471":
+                st.markdown(
+                    '<div style="color:#1E8449;font-weight:700;font-size:.82rem;margin-top:4px;">'
+                    "✅ Correct naming convention</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="color:#C0392B;font-weight:700;font-size:.82rem;margin-top:4px;">'
+                    "❌ Does not follow the convention</div>",
+                    unsafe_allow_html=True,
+                )
+
+    with c2:
+        base = st.selectbox(
+            "2️⃣ Create working branch from…",
+            ["— select —", "main", "dev", "qa", "feature/4001 (stale)"],
+            index=0,
+            key="bs_base_input",
+            help="Where should the new branch be created from?",
+        )
+        if base != "— select —":
+            if base == "dev":
+                st.markdown(
+                    '<div style="color:#1E8449;font-weight:700;font-size:.82rem;margin-top:4px;">'
+                    "✅ Latest approved base</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="color:#C0392B;font-weight:700;font-size:.82rem;margin-top:4px;">'
+                    "❌ Not the correct base</div>",
+                    unsafe_allow_html=True,
+                )
+
+    with c3:
+        target = st.selectbox(
+            "3️⃣ Initial PR targets…",
+            ["— select —", "main", "dev", "qa"],
+            index=0,
+            key="bs_target_input",
+            help="Which branch should the initial PR be opened against?",
+        )
+        if target != "— select —":
+            if target == "dev":
+                st.markdown(
+                    '<div style="color:#1E8449;font-weight:700;font-size:.82rem;margin-top:4px;">'
+                    "✅ Correct PR target</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="color:#C0392B;font-weight:700;font-size:.82rem;margin-top:4px;">'
+                    "❌ Wrong PR target</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ---- 5. Live preview ----
+    if branch_name.strip() and base != "— select —" and target != "— select —":
+        st.markdown("---")
+        st.markdown("#### 🔎 Your chosen flow")
+        st.markdown(
+            vflow(
+                [base, branch_name.strip(), f"PR → {target}"],
+                ["fbox-navy", "fbox-teal", "fbox-gold"],
+            ),
+            unsafe_allow_html=True,
+        )
+
+    # ---- 6. Grade / Reveal buttons ----
+    st.markdown("---")
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        grade = st.button("✅ Grade my choices", type="primary", use_container_width=True)
+    with c2:
+        reveal = st.button("🔑 Show correct answer", use_container_width=True)
+
+    if grade:
+        score = 0
+        feedback = []
+
+        if branch_name.strip() == "feature/4471":
+            score += 1
+            feedback.append((
+                "success",
+                "✅ **Branch name** — `feature/4471` follows the `feature/<issue-id>` convention.",
+            ))
+        else:
+            feedback.append((
+                "error",
+                f"❌ **Branch name** — expected `feature/4471`, got `{branch_name.strip() or '—'}`.",
+            ))
+
+        if base == "dev":
+            score += 2
+            feedback.append((
+                "success",
+                "✅ **Base branch** — `dev` is the latest approved integration branch for feature work.",
+            ))
+        elif base == "main":
+            feedback.append((
+                "error",
+                "❌ **Base branch** — `main` is production. Features must branch from the latest `dev`.",
+            ))
+        elif base == "qa":
+            feedback.append((
+                "error",
+                "❌ **Base branch** — `qa` is a promotion target, not a source for feature branches.",
+            ))
+        elif base == "feature/4001 (stale)":
+            feedback.append((
+                "error",
+                "❌ **Base branch** — never branch from a stale local branch. Run `git pull origin dev` first.",
+            ))
+        else:
+            feedback.append(("warning", "⚠️ **Base branch** — pick one."))
+
+        if target == "dev":
+            score += 2
+            feedback.append((
+                "success",
+                "✅ **PR target** — the initial PR must go to `dev`. Direct PRs to QA are prohibited.",
+            ))
+        elif target == "qa":
+            feedback.append((
+                "error",
+                "❌ **PR target** — direct feature → QA merges are not permitted under the standard workflow.",
+            ))
+        elif target == "main":
+            feedback.append((
+                "error",
+                "❌ **PR target** — `main` is not the initial PR target for features.",
+            ))
+        else:
+            feedback.append(("warning", "⚠️ **PR target** — pick one."))
+
+        record_score("branch_sim", score, 5)
+
+        st.markdown(f"**Score:** {score_pill(score, 5)}", unsafe_allow_html=True)
+        for kind, msg in feedback:
+            getattr(st, kind)(msg)
+
+        if score == 5:
+            st.success("🏆 Perfect — you've mastered the branch workflow.")
+            st.balloons()
+
+    if reveal:
+        st.markdown("---")
+        st.markdown("### 🔑 Correct answers")
+        kpi_row(
+            [
+                ("Branch name", "feature/4471"),
+                ("Base branch", "dev"),
+                ("Initial PR target", "dev"),
+            ]
+        )
+
+        st.markdown("#### ✅ Correct flow")
+        st.markdown(
+            vflow(
+                ["dev (pull latest)", "feature/4471", "PR → dev"],
+                ["fbox-navy", "fbox-teal", "fbox-gold"],
+            ),
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("#### 📜 Exact Git commands")
+        st.code(
+            """# 1. Update dev and branch from it
+git fetch origin
+git checkout dev
+git pull origin dev
+git checkout -b feature/4471
+
+# 2. Implement, then commit
+git add .
+git commit -m "feat(loan-report): add paginated loan report (#4471)"
+
+# 3. Stay in sync with dev
+git fetch origin
+git rebase origin/dev
+
+# 4. Run all checks before pushing
+#    lint · type-check · build · tests · EXPLAIN ANALYZE if SQL changed
+
+# 5. Push
+git push -u origin feature/4471
+
+# 6. Open PR on GitHub with:
+#      base:    dev
+#      compare: feature/4471""",
+            language="bash",
+        )
+
+    # ---- 7. Two-stage promotion diagram (always visible) ----
+    st.markdown("---")
+    st.markdown("### 🚀 Two-stage promotion: feature → dev → qa")
+    st.caption("The feature PR stops at `dev`. A separate promotion PR later moves `dev` → `qa`.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Stage 1 — Feature merge**")
+        st.markdown(
+            hflow(["feature/4471", "dev"], gold_idx=(1,)),
+            unsafe_allow_html=True,
+        )
+        st.caption("Squash-merge after reviews and CI pass.")
+
+    with c2:
+        st.markdown("**Stage 2 — Release promotion**")
+        st.markdown(
+            hflow(["dev", "qa"], gold_idx=(1,)),
+            unsafe_allow_html=True,
+        )
+        st.caption("A separate batch PR promotes `dev` → `qa` when a release is ready.")
+
+    st.error(
+        "**Never merge `feature/4471` directly into `qa`.** "
+        "Only `dev` → `qa` promotions are permitted."
+    )
+    header(
+        "Git Branch Flow Simulator",
         "Choose the right base branch and PR target — get graded instantly",
         "SECTION 3",
     )
