@@ -93,7 +93,6 @@ hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
   position: sticky;
   top: 4rem;                 /* sits below Streamlit's top bar */
   z-index: 200;
-  background: #F7FAFC;
   padding: 16px 0 14px 0;
   margin: 0 0 12px 0;
   border-bottom: 2px solid var(--line);
