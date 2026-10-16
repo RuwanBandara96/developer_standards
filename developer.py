@@ -1,18 +1,19 @@
 # ==============================================================================
 #  DEVELOPER STANDARDS & DEVELOPMENT WORKFLOW — INTERACTIVE EXAM EDITION
-#  Login + Graded Exam (multi-set) + Submission Storage + Admin Console
+#  Login + Graded Exam (multi-set, random pool) + Submission Storage + Admin Console
 # ------------------------------------------------------------------------------
 #  Run with:   streamlit run developer.py
 #  Requires:   streamlit, pandas, numpy, plotly
 #
 #  Credentials are NOT stored in this file. They live in .streamlit/secrets.toml
-#  Question bank is stored in exam_bank.json (falls back to built-in defaults).
+#  Question pool is stored in questions_pool.py (and overridden by exam_bank.json).
 #
 #  Sessions survive browser refresh via a signed token in the URL
 #  (?session=...). Set [session] secret in secrets.toml for production.
 # ==============================================================================
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -27,6 +28,7 @@ import base64
 import html as html_lib
 from datetime import datetime
 from posts import init_posts_state, s_posts_hub, s_posts_management
+from questions_pool import QUESTION_POOL
 
 # ------------------------------------------------------------------------------
 # PAGE CONFIG
@@ -85,26 +87,32 @@ hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
 
 .slide-title{font-size:1.85rem;font-weight:800;color:var(--navy);margin:0 0 2px 0;line-height:1.15;}
 .slide-sub{font-size:.94rem;color:var(--muted);margin:0 0 16px 0;}
+
+/* ---------- STICKY PAGE HEADER ---------- */
 .page-header{
   position: sticky;
-  top: 1000rem;                 /* pushed down — extra gap below the navbar */
+  top: 4rem;                 /* sits below Streamlit's top bar */
   z-index: 200;
-#   background: #F7FAFC;
-  padding: 25px 0 14px 0;    /* top padding = the visible gap */
-  margin: 0 0 8px 0;
+  background: #F7FAFC;
+  padding: 16px 0 14px 0;
+  margin: 0 0 12px 0;
   border-bottom: 2px solid var(--line);
   backdrop-filter: blur(6px);
 }
+.page-header .sec-num{ margin: 0 0 10px 0; }
+.page-header .slide-title{ margin: 0; }
+.page-header .slide-sub{ margin: 2px 0 0 0; }
+
 .sec-num{
   display:inline-block;
   background:var(--teal);
   color:#fff;
   font-size:.7rem;
   font-weight:800;
-  padding:5px 14px;         /* horizontal pill — was 10px 10px (square) */
+  padding:5px 14px;
   border-radius:20px;
   letter-spacing:1.2px;
-  margin:0 0 10px 0;        /* a touch more space below the chip */
+  margin:0 0 10px 0;
   line-height:1;
 }
 
@@ -336,6 +344,93 @@ def slugify(name: str) -> str:
     """Turn a human name into a URL-safe id."""
     s = re.sub(r"[^a-zA-Z0-9]+", "_", (name or "").strip().lower()).strip("_")
     return s or "exam"
+
+# ------------------------------------------------------------------------------
+# LIVE COUNTDOWN TIMER (JavaScript-driven, ticks every second)
+# ------------------------------------------------------------------------------
+def _live_timer_html(remaining_seconds: int, exam_name: str = "", warn: bool = False) -> str:
+    """Build the HTML+JS for a live ticking countdown timer."""
+    name_escaped = html_lib.escape(exam_name or "")
+    warn_style = "background:#C0392B;animation:dvtpulse 1.2s infinite;" if warn else "background:#0B3C5D;"
+    return f"""
+    <style>
+      @keyframes dvtpulse {{0%{{opacity:1}}50%{{opacity:.6}}100%{{opacity:1}}}}
+      html, body {{ margin:0; padding:0; background:transparent; overflow:hidden; }}
+      .dvt-wrap {{ display:flex; align-items:center; gap:6px; padding:2px 0; }}
+      .dvt-clock {{
+        display:inline-block;
+        {warn_style}
+        color:#ffffff;
+        padding:9px 20px;
+        border-radius:10px;
+        font-weight:800;
+        font-size:1.05rem;
+        letter-spacing:1.5px;
+        box-shadow:0 3px 10px rgba(11,60,93,.25);
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+        min-width:105px;
+        text-align:center;
+      }}
+      .dvt-set {{
+        display:inline-block;
+        background:#E9EFF5;
+        color:#0B3C5D;
+        border:1px solid #C6D6E4;
+        border-radius:20px;
+        padding:4px 12px;
+        font-size:.72rem;
+        font-weight:700;
+        letter-spacing:.5px;
+        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
+        max-width:340px;
+      }}
+    </style>
+    <div class="dvt-wrap">
+      <span id="dvt-clock" class="dvt-clock">&#9201; 00:00</span>
+      <span class="dvt-set">{name_escaped}</span>
+    </div>
+    <script>
+    (function() {{
+      var remaining = {int(max(0, remaining_seconds))};
+      var el = document.getElementById('dvt-clock');
+      function fmt(s) {{
+        var m = Math.floor(s / 60);
+        var ss = s % 60;
+        return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss;
+      }}
+      function tick() {{
+        if (remaining <= 0) {{
+          el.innerHTML = '&#9201; 00:00';
+          el.style.background = '#C0392B';
+          el.style.animation = 'dvtpulse 1.2s infinite';
+          // Trigger a Python rerun so the exam can be graded
+          try {{ window.parent.location.reload(); }} catch(e) {{}}
+          return;
+        }}
+        el.innerHTML = '&#9201; ' + fmt(remaining);
+        if (remaining <= 300) {{
+          el.style.background = '#C0392B';
+          el.style.animation = 'dvtpulse 1.2s infinite';
+        }}
+        remaining -= 1;
+      }}
+      tick();
+      setInterval(tick, 1000);
+    }})();
+    </script>
+    """
+
+
+def _render_live_timer(remaining_seconds: int, exam_name: str = "", warn: bool = False, height: int = 48):
+    """Render the live ticking countdown timer inside an iframe."""
+    components.html(
+        _live_timer_html(remaining_seconds, exam_name, warn),
+        height=height,
+        scrolling=False,
+    )
 
 
 # ==============================================================================
@@ -623,6 +718,7 @@ DEFAULT_EXAM_ID = "default"
 DEFAULT_EXAM_NAME = "Developer Standards — Default Exam"
 DEFAULT_EXAM_DURATION = 30
 DEFAULT_EXAM_PASS_MARK = 0.80
+DEFAULT_QUESTIONS_TO_PICK = 30    # how many of the pool to sample per candidate
 
 
 def save_submission(record: dict) -> bool:
@@ -650,13 +746,15 @@ def load_submissions():
 
 
 def _default_exam_dict():
-    """Wrap the built-in default questions into a single default exam set."""
+    """Wrap the imported QUESTION_POOL into a single default exam set."""
+    pool = globals().get("DEFAULT_EXAM_QUESTIONS", [])
     return {
         DEFAULT_EXAM_ID: {
             "name": DEFAULT_EXAM_NAME,
             "duration_minutes": DEFAULT_EXAM_DURATION,
             "pass_mark": DEFAULT_EXAM_PASS_MARK,
-            "questions": globals().get("DEFAULT_EXAM_QUESTIONS", []),
+            "questions_to_pick": DEFAULT_QUESTIONS_TO_PICK,
+            "questions": pool,
         }
     }
 
@@ -689,10 +787,10 @@ def load_exam_bank() -> dict:
                         "name": DEFAULT_EXAM_NAME,
                         "duration_minutes": DEFAULT_EXAM_DURATION,
                         "pass_mark": DEFAULT_EXAM_PASS_MARK,
+                        "questions_to_pick": DEFAULT_QUESTIONS_TO_PICK,
                         "questions": legacy,
                     }
                 }
-                # Persist the migrated bank so we only migrate once
                 try:
                     with open(EXAM_BANK_PATH, "w", encoding="utf-8") as fh:
                         json.dump(migrated, fh, indent=2)
@@ -751,8 +849,8 @@ _defaults = {
     "registered_users": {},
     "login_time": None,
     # exam bank + selected set
-    "exam_bank": {},              # { exam_id: { name, duration_minutes, pass_mark, questions: [] } }
-    "active_exam_id": None,       # which exam set the candidate is currently taking
+    "exam_bank": {},
+    "active_exam_id": None,
     # exam runtime
     "exam_started": False,
     "exam_submitted": False,
@@ -785,414 +883,9 @@ def total_score():
 
 
 # ==============================================================================
-# EXAM QUESTION BANK (built-in defaults — used only if no JSON exists)
+# DEFAULT EXAM QUESTIONS — imported from questions_pool.py
 # ==============================================================================
-DEFAULT_EXAM_QUESTIONS = [
-    {
-        "id": "Q01",
-        "section": "1. Purpose & Governance",
-        "question": "Who is responsible for verifying a developer's own implementation before the PR is raised or the work is handed to QA?",
-        "options": [
-            "The QA team, because verification is their primary responsibility",
-            "The technical lead who reviews the pull request",
-            "The developer who wrote the code",
-            "The automated test suite",
-        ],
-        "answer": "The developer who wrote the code",
-        "explanation": "Developer testing is a mandatory pre-PR step. QA must never be the first stage of meaningful testing.",
-    },
-    {
-        "id": "Q02",
-        "section": "1. Purpose & Governance",
-        "question": "Which statement about these development standards is correct?",
-        "options": [
-            "They are optional guidelines that apply to new projects only",
-            "They are mandatory for all new development work and applicable maintenance changes",
-            "They apply only to backend TypeScript services",
-            "They apply only when the technical lead explicitly requests them",
-        ],
-        "answer": "They are mandatory for all new development work and applicable maintenance changes",
-        "explanation": "The standards are mandatory across implementation, testing, code review and deployment.",
-    },
-    {
-        "id": "Q03",
-        "section": "2. TypeScript Type Safety",
-        "question": "Which type is the type-safe counterpart of `any` and should be used when a value's type is genuinely unknown?",
-        "options": ["`never`", "`unknown`", "`object`", "`{}`"],
-        "answer": "`unknown`",
-        "explanation": "`unknown` forces validation or narrowing before use, whereas `any` disables type checking entirely.",
-    },
-    {
-        "id": "Q04",
-        "section": "2. TypeScript Type Safety",
-        "question": "If `any` is genuinely required (for example at a third-party boundary), what is the correct behaviour?",
-        "options": [
-            "Use it freely — no explanation is needed",
-            "Document the reason and keep the usage limited to that boundary",
-            "Replace it with `object` to silence the linter",
-            "Add `// @ts-ignore` on the line above instead",
-        ],
-        "answer": "Document the reason and keep the usage limited to that boundary",
-        "explanation": "Only documented, boundary-limited `any` usage is acceptable.",
-    },
-    {
-        "id": "Q05",
-        "section": "2. TypeScript Type Safety",
-        "question": "Which of the following is NOT a required check before requesting a PR review?",
-        "options": [
-            "TypeScript type checks pass",
-            "Relevant lint checks pass",
-            "Every single function has a dedicated unit test",
-            "API request and response types match the actual data structures",
-        ],
-        "answer": "Every single function has a dedicated unit test",
-        "explanation": "100% unit-test coverage is not required. Meaningful tests for business rules, edge cases and error scenarios are expected.",
-    },
-    {
-        "id": "Q06",
-        "section": "2. TypeScript Type Safety",
-        "question": "What is the correct replacement for `Promise<any>` in a service method that returns a loan?",
-        "options": [
-            "`Promise<object>`",
-            "`Promise<LoanResponse>` using a defined interface",
-            "`Promise<void>`",
-            "`Promise<Array<any>>`",
-        ],
-        "answer": "`Promise<LoanResponse>` using a defined interface",
-        "explanation": "Define an explicit interface or type alias describing the real shape of the returned data.",
-    },
-    {
-        "id": "Q07",
-        "section": "2. TypeScript Type Safety",
-        "question": "What is the main problem with `const data = await res.json() as any;`?",
-        "options": [
-            "It is slower at runtime",
-            "It asserts a shape that was never validated, hiding mismatches between the API contract and the code",
-            "It breaks the build",
-            "It is not valid TypeScript syntax",
-        ],
-        "answer": "It asserts a shape that was never validated, hiding mismatches between the API contract and the code",
-        "explanation": "Use `unknown` and validate with a type guard or schema before using the data.",
-    },
-    {
-        "id": "Q08",
-        "section": "2. TypeScript Type Safety",
-        "question": "How should monetary / Decimal values be handled?",
-        "options": [
-            "Convert them to a JavaScript number as early as possible",
-            "Keep them as Decimal and pass them through the standard type-safe converters (e.g. `withOptionalCheckDecimal`)",
-            "Store them as strings and parse them on the client",
-            "Round them to two decimal places immediately",
-        ],
-        "answer": "Keep them as Decimal and pass them through the standard type-safe converters (e.g. `withOptionalCheckDecimal`)",
-        "explanation": "Casting Decimal to number loses precision — a serious defect in financial systems.",
-    },
-    {
-        "id": "Q09",
-        "section": "3. Git Branching & Workflow",
-        "question": "You have been assigned issue #4471 (a new feature). What is the correct working branch name?",
-        "options": ["feature/4471", "feature-4471", "4471-feature", "dev/feature/4471"],
-        "answer": "feature/4471",
-        "explanation": "Feature branches follow `feature/<issue-id>`. Bug fixes follow `bugfix/<issue-id>`.",
-    },
-    {
-        "id": "Q10",
-        "section": "3. Git Branching & Workflow",
-        "question": "Where must the working branch be created from?",
-        "options": [
-            "The latest `dev` branch",
-            "`main`, because it is the most stable",
-            "`qa`, because QA will test it",
-            "Whatever local branch is currently checked out",
-        ],
-        "answer": "The latest `dev` branch",
-        "explanation": "Always `git fetch` and branch from the latest approved `dev`.",
-    },
-    {
-        "id": "Q11",
-        "section": "3. Git Branching & Workflow",
-        "question": "What is the initial PR target for a feature branch?",
-        "options": ["main", "dev", "qa", "Whichever branch QA asks for"],
-        "answer": "dev",
-        "explanation": "The initial PR must target `dev`. Direct feature → QA merges are prohibited.",
-    },
-    {
-        "id": "Q12",
-        "section": "3. Git Branching & Workflow",
-        "question": "Which merge is NOT permitted under the standard workflow?",
-        "options": [
-            "feature/4471 → dev",
-            "dev → qa via a separate promotion PR",
-            "feature/4471 → qa directly",
-            "bugfix/4472 → dev",
-        ],
-        "answer": "feature/4471 → qa directly",
-        "explanation": "Only `dev` → `qa` promotions are permitted.",
-    },
-    {
-        "id": "Q13",
-        "section": "3. Git Branching & Workflow",
-        "question": "You still have a local `feature/4001` that has not been synced for three weeks. What should you do before starting new work?",
-        "options": [
-            "Branch from it — it already contains your earlier work",
-            "Do not branch from it; fetch origin and create the new branch from the latest `dev`",
-            "Rebase it onto `main` and continue from there",
-            "Delete the whole repository and clone it again",
-        ],
-        "answer": "Do not branch from it; fetch origin and create the new branch from the latest `dev`",
-        "explanation": "Never branch from a stale local branch — you would inherit obsolete code and merge conflicts.",
-    },
-    {
-        "id": "Q14",
-        "section": "4. Developer Testing",
-        "question": "When must developer testing be completed?",
-        "options": [
-            "After QA raises defects",
-            "Before the PR is created and before QA handover",
-            "Only when the technical lead asks for it",
-            "After the code has been merged into dev",
-        ],
-        "answer": "Before the PR is created and before QA handover",
-        "explanation": "Self-verification is a gate that must be passed before the PR is raised.",
-    },
-    {
-        "id": "Q15",
-        "section": "4. Developer Testing",
-        "question": "Lint reports two new errors introduced by your change and the release is due today. What do you do?",
-        "options": [
-            "Merge now and fix it on Monday",
-            "Add `eslint-disable` comments so the checks pass, then merge",
-            "Resolve the errors before merging, even if it delays the merge",
-            "Ask QA to ignore the lint failures for this release",
-        ],
-        "answer": "Resolve the errors before merging, even if it delays the merge",
-        "explanation": "Deadlines never justify bypassing required lint, type or build checks.",
-    },
-    {
-        "id": "Q16",
-        "section": "4. Developer Testing",
-        "question": "QA reports a defect that your own testing should have caught. What is the expected response?",
-        "options": [
-            "Reply 'works on my machine' and ask them to retest",
-            "Fix it, add a regression test, and strengthen your pre-handover testing",
-            "Raise a new bug and let QA prioritise it",
-            "Blame the requirements for not mentioning the case",
-        ],
-        "answer": "Fix it, add a regression test, and strengthen your pre-handover testing",
-        "explanation": "Own the defect: fix it, add regression coverage, and prevent the same class of issue recurring.",
-    },
-    {
-        "id": "Q17",
-        "section": "4. Developer Testing",
-        "question": "Which of these is NOT part of the developer's pre-PR verification checklist?",
-        "options": [
-            "Verifying API requests and responses",
-            "Validating database operations and returned data",
-            "Testing permissions and access restrictions",
-            "Waiting for the QA team to run the regression pack first",
-        ],
-        "answer": "Waiting for the QA team to run the regression pack first",
-        "explanation": "QA is a downstream gate — it is never a substitute for developer self-verification.",
-    },
-    {
-        "id": "Q18",
-        "section": "5. SQL Performance",
-        "question": "What volume of dummy records is recommended when preparing performance test data?",
-        "options": ["100–200", "500–800", "2,000–3,000", "At least 1,000,000"],
-        "answer": "2,000–3,000",
-        "explanation": "2,000–3,000 representative rows give meaningful performance signal without excessive setup cost.",
-    },
-    {
-        "id": "Q19",
-        "section": "5. SQL Performance",
-        "question": "In a MySQL execution plan, what does `type: ALL` mean?",
-        "options": [
-            "All columns are being returned",
-            "A full table scan is being performed because no usable index was selected",
-            "All available indexes were used",
-            "The query result was served from cache",
-        ],
-        "answer": "A full table scan is being performed because no usable index was selected",
-        "explanation": "`type: ALL` is a red flag on large tables — review the WHERE / JOIN / ORDER BY columns and add an index.",
-    },
-    {
-        "id": "Q20",
-        "section": "5. SQL Performance",
-        "question": "A plan shows `Using temporary; Using filesort` on a GROUP BY query over millions of rows. What does this indicate?",
-        "options": [
-            "The query is optimal",
-            "The database is building a temporary table and sorting in memory, usually because of a missing or unsuitable index",
-            "The result set is empty",
-            "The connection pool is exhausted",
-        ],
-        "answer": "The database is building a temporary table and sorting in memory, usually because of a missing or unsuitable index",
-        "explanation": "Add an index covering the join/group columns, or pre-aggregate into a summary table.",
-    },
-    {
-        "id": "Q21",
-        "section": "6. Query Efficiency",
-        "question": "For an endpoint returning 100 rows from a very large table, which approach is faster?",
-        "options": [
-            "TypeORM QueryBuilder with several `leftJoinAndSelect` calls and `getMany()`",
-            "Raw SQL selecting only the required columns with an explicit `LIMIT`",
-            "Loading all entities and slicing them in the application",
-            "Fetching with `SELECT *` and filtering in code",
-        ],
-        "answer": "Raw SQL selecting only the required columns with an explicit `LIMIT`",
-        "explanation": "Retrieve only what you need.",
-    },
-    {
-        "id": "Q22",
-        "section": "6. Query Efficiency",
-        "question": "Why is `SELECT *` discouraged in production queries?",
-        "options": [
-            "It is invalid SQL",
-            "It retrieves columns that are not needed, increasing I/O, network and hydration cost",
-            "It always causes a full table scan",
-            "It prevents parameterisation",
-        ],
-        "answer": "It retrieves columns that are not needed, increasing I/O, network and hydration cost",
-        "explanation": "List columns explicitly — ideally through a mapper schema.",
-    },
-    {
-        "id": "Q23",
-        "section": "6. Query Efficiency",
-        "question": "What is the problem with running one query per row inside a `for` loop?",
-        "options": [
-            "It causes a deadlock — fix it with a transaction",
-            "It is an N+1 query problem — fix it with a JOIN or a batched `IN (...)` query",
-            "It causes a race condition — fix it with a mutex",
-            "It leaks memory — fix it with pagination",
-        ],
-        "answer": "It is an N+1 query problem — fix it with a JOIN or a batched `IN (...)` query",
-        "explanation": "One query per row multiplies round-trips. Batch or join instead.",
-    },
-    {
-        "id": "Q24",
-        "section": "7. Code Review & PR Quality",
-        "question": "Which combination must a pull request contain in order to be reviewable?",
-        "options": [
-            "Only the code changes",
-            "A linked issue, a clear description of the implementation, testing evidence, and the required approvals",
-            "A screenshot of the IDE",
-            "A verbal summary given to the technical lead",
-        ],
-        "answer": "A linked issue, a clear description of the implementation, testing evidence, and the required approvals",
-        "explanation": "All four elements are required before a PR can be merged.",
-    },
-    {
-        "id": "Q25",
-        "section": "7. Code Review & PR Quality",
-        "question": "In the non-compliant PR, the clause `WHERE a.name LIKE '%${search}%'` is used. What is the most severe problem?",
-        "options": [
-            "It is slower than a parameterised query",
-            "It is vulnerable to SQL injection because user input is interpolated directly into the SQL string",
-            "It returns too many columns",
-            "It uses a reserved keyword",
-        ],
-        "answer": "It is vulnerable to SQL injection because user input is interpolated directly into the SQL string",
-        "explanation": "Always use parameterised queries with `?` placeholders.",
-    },
-    {
-        "id": "Q26",
-        "section": "7. Code Review & PR Quality",
-        "question": "Is using raw SQL instead of an ORM repository a standards violation?",
-        "options": [
-            "Yes, always — ORM repositories are mandatory",
-            "No — raw SQL is acceptable and is often preferred for performance-sensitive queries",
-            "Yes, unless QA approves it",
-            "Only for SELECT statements",
-        ],
-        "answer": "No — raw SQL is acceptable and is often preferred for performance-sensitive queries",
-        "explanation": "Section 6.1 explicitly prefers raw SQL where performance matters.",
-    },
-    {
-        "id": "Q27",
-        "section": "7. Code Review & PR Quality",
-        "question": "A PR targets `qa`, has 0 approvals, failed lint, and three TypeScript errors suppressed with `as any`. What is the correct reviewer action?",
-        "options": [
-            "Approve it — the author said it works locally",
-            "Reject / request changes: wrong target branch, no approvals, failing checks and bypassed type safety",
-            "Merge it and raise a follow-up ticket for the issues",
-            "Ask QA to test it directly on the branch",
-        ],
-        "answer": "Reject / request changes: wrong target branch, no approvals, failing checks and bypassed type safety",
-        "explanation": "Reviewers must enforce every requirement.",
-    },
-    {
-        "id": "Q28",
-        "section": "8. Automated Testing",
-        "question": "An automated test fails on staging but passed locally. What is the correct action?",
-        "options": [
-            "Increase the test timeout and rerun",
-            "Disable the test until someone investigates it",
-            "Investigate and identify the root cause (implementation, test, configuration or environment), fix it and rerun",
-            "Ask QA to rerun it later",
-        ],
-        "answer": "Investigate and identify the root cause (implementation, test, configuration or environment), fix it and rerun",
-        "explanation": "Never treat a symptom.",
-    },
-    {
-        "id": "Q29",
-        "section": "8. Automated Testing",
-        "question": "Is it acceptable to skip or disable a failing automated test to unblock a release?",
-        "options": [
-            "Yes, if the release is urgent",
-            "Yes, if the test is flaky",
-            "No — failures must be investigated and resolved; disabling tests is never the correct response",
-            "Only with QA approval",
-        ],
-        "answer": "No — failures must be investigated and resolved; disabling tests is never the correct response",
-        "explanation": "Bypassing required checks is explicitly prohibited.",
-    },
-    {
-        "id": "Q30",
-        "section": "9. Development Workflow",
-        "question": "Which is the correct FIRST step of the development workflow?",
-        "options": ["Branch preparation", "Requirement analysis", "Implementation", "Pull request to DEV"],
-        "answer": "Requirement analysis",
-        "explanation": "Everything starts with understanding the requirement and acceptance criteria.",
-    },
-    {
-        "id": "Q31",
-        "section": "9. Development Workflow",
-        "question": "Choose the correct order of the workflow.",
-        "options": [
-            "Branch Preparation → Requirement Analysis → Implementation → PR to DEV → Developer Validation → Merge to DEV → QA Promotion → Automated Testing & Staging",
-            "Requirement Analysis → Branch Preparation → Implementation → Developer Validation → PR to DEV → Merge to DEV → QA Promotion → Automated Testing & Staging",
-            "Requirement Analysis → Implementation → Branch Preparation → Developer Validation → Merge to DEV → PR to DEV → QA Promotion → Automated Testing & Staging",
-            "Requirement Analysis → Branch Preparation → Implementation → PR to DEV → Developer Validation → Merge to DEV → Automated Testing & Staging → QA Promotion",
-        ],
-        "answer": "Requirement Analysis → Branch Preparation → Implementation → Developer Validation → PR to DEV → Merge to DEV → QA Promotion → Automated Testing & Staging",
-        "explanation": "Developer validation always precedes the PR.",
-    },
-    {
-        "id": "Q32",
-        "section": "10. Developer Accountability",
-        "question": "Which of the following is explicitly NOT acceptable?",
-        "options": [
-            "Using `unknown` together with runtime validation",
-            "Opening an initial PR against `dev`",
-            "Sending an initial feature PR directly to `qa`",
-            "Adding parameterised queries",
-        ],
-        "answer": "Sending an initial feature PR directly to `qa`",
-        "explanation": "Only `dev` → `qa` promotions are permitted.",
-    },
-    {
-        "id": "Q33",
-        "section": "10. Developer Accountability",
-        "question": "A report query runs in 200 ms on dev with 500 rows, but staging holds 3 million rows. What should you do before opening the PR?",
-        "options": [
-            "Ship it — 200 ms is fast enough and staging is just slow",
-            "Add a cache layer and hope for the best",
-            "Run `EXPLAIN ANALYZE` with 2,000–3,000 representative rows, attach the evidence to the issue, and fix any bottlenecks",
-            "Move the aggregation into the application layer so the database does less work",
-        ],
-        "answer": "Run `EXPLAIN ANALYZE` with 2,000–3,000 representative rows, attach the evidence to the issue, and fix any bottlenecks",
-        "explanation": "Performance must be validated with realistic data.",
-    },
-]
+DEFAULT_EXAM_QUESTIONS = QUESTION_POOL
 
 
 # --- Load the exam bank now that DEFAULT_EXAM_QUESTIONS is defined ---
@@ -1207,7 +900,7 @@ if not st.session_state.active_exam_id:
 
 
 # ==============================================================================
-# EXAM HELPERS (multi-set aware)
+# EXAM HELPERS (multi-set, random pool)
 # ==============================================================================
 EXAM_CONFIG = {
     "shuffle_questions": True,
@@ -1240,15 +933,46 @@ def _active_pass_mark() -> float:
     return float(_active_exam().get("pass_mark", 0.80))
 
 
+def _active_questions_to_pick() -> int:
+    """How many questions to sample for one candidate. 0 = use the whole pool."""
+    exam = _active_exam()
+    try:
+        n = int(exam.get("questions_to_pick", 0) or 0)
+    except Exception:
+        n = 0
+    pool_size = len(exam.get("questions", []))
+    if n <= 0 or n > pool_size:
+        return pool_size
+    return n
+
+
 def _build_exam_paper():
+    """
+    Build the exam paper for the current candidate:
+      1. Take the full question pool for the active exam.
+      2. Randomly sample `questions_to_pick` of them (or all if 0).
+      3. Shuffle the options inside each sampled question.
+      4. Shuffle the order of the sampled questions.
+    Two candidates sitting at the same time will get different papers.
+    """
+    pool = _active_exam_questions()
+    if not pool:
+        return []
+
+    pick_n = _active_questions_to_pick()
+    # random.sample guarantees unique questions and a fresh pick per call.
+    selected = random.sample(pool, pick_n)
+
     paper = []
-    for q in _active_exam_questions():
+    for q in selected:
         opts = list(q["options"])
         if EXAM_CONFIG["shuffle_options"]:
             random.shuffle(opts)
         paper.append({**q, "options": opts})
+
     if EXAM_CONFIG["shuffle_questions"]:
         random.shuffle(paper)
+
     return paper
 
 
@@ -1349,10 +1073,9 @@ def _render_exam_intro():
     if len(available) == 1:
         eid, ename, qcount = available[0]
         st.session_state.active_exam_id = eid
-        st.info(f"Only one exam set is available — **{ename}** ({qcount} questions).")
+        st.info(f"Only one exam set is available — **{ename}** ({qcount} questions in the pool).")
     else:
         options = {f"{ename}  ·  {qcount} questions": eid for eid, ename, qcount in available}
-        # Preserve current selection if possible
         current = st.session_state.active_exam_id
         current_label = next((k for k, v in options.items() if v == current), list(options.keys())[0])
         default_idx = list(options.keys()).index(current_label)
@@ -1367,7 +1090,9 @@ def _render_exam_intro():
 
     exam = _active_exam()
     questions = exam.get("questions", [])
-    total = len(questions)
+    pool_size = len(questions)
+    pick_n = _active_questions_to_pick()
+    total = pick_n                                       # number the candidate will actually see
     duration_min = int(exam.get("duration_minutes", 30))
     pass_mark_pct = int(exam.get("pass_mark", 0.80) * 100)
 
@@ -1380,10 +1105,10 @@ def _render_exam_intro():
               <h4 style="color:#0B3C5D;margin-top:0;">Before you begin</h4>
               <ul style="font-size:.88rem;line-height:1.85;margin:0;padding-left:20px;">
                 <li><b>Exam set:</b> {html_lib.escape(exam.get('name','—'))}</li>
-                <li>The exam contains <b>{total} multiple-choice questions</b>.</li>
+                <li>You will be asked <b>{total} multiple-choice questions</b>, randomly selected from a pool of <b>{pool_size}</b>.</li>
                 <li>You have <b>{duration_min} minutes</b>. The exam auto-submits when the timer reaches zero.</li>
                 <li>The pass mark is <b>{pass_mark_pct}%</b>. Each question is worth one mark.</li>
-                <li>Questions and answer options are <b>shuffled</b> for every attempt.</li>
+                <li>Questions <b>and answer options</b> are shuffled for every attempt.</li>
                 <li>You can move backwards and forwards and change answers until you submit.</li>
                 <li>No negative marking — always answer every question.</li>
               </ul>
@@ -1392,7 +1117,7 @@ def _render_exam_intro():
             unsafe_allow_html=True,
         )
     with c2:
-        kpi_row([("Questions", str(total)), ("Duration", f"{duration_min} min")])
+        kpi_row([("Questions", f"{total} / {pool_size}"), ("Duration", f"{duration_min} min")])
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         kpi_row([("Pass mark", f"{pass_mark_pct}%"), ("Attempts", str(st.session_state.exam_attempts))])
 
@@ -1420,7 +1145,7 @@ def _render_exam_intro():
             disabled=(not agree) or (total == 0),
         )
     with c2:
-        if total == 0:
+        if pool_size == 0:
             st.warning("This exam set has no questions. Ask an administrator to add some.")
         elif st.session_state.exam_attempts > 0:
             st.caption(f"You have completed {st.session_state.exam_attempts} attempt(s). Retaking is allowed; your latest score is recorded.")
@@ -1441,7 +1166,7 @@ def _render_exam_running():
     total = len(paper)
     exam_name = _active_exam().get("name", "—")
 
-    # ---- timer ----
+    # ---- timer (Python-side auto-grade check) ----
     remaining = _exam_remaining_seconds()
     if remaining <= 0:
         _grade_exam()
@@ -1453,11 +1178,11 @@ def _render_exam_running():
 
     c1, c2, c3 = st.columns([1.4, 1, 1])
     with c1:
-        warn = " timer-warn" if remaining < 300 else ""
-        st.markdown(
-            f'<div class="timer-box{warn}">⏱ {mins:02d}:{secs:02d}</div>'
-            f'<span class="set-badge">{html_lib.escape(exam_name)}</span>',
-            unsafe_allow_html=True,
+        # Live ticking timer in an iframe — updates every second in the browser
+        _render_live_timer(
+            remaining_seconds=int(remaining),
+            exam_name=exam_name,
+            warn=(remaining < 300),
         )
     with c2:
         st.markdown(
@@ -1474,11 +1199,6 @@ def _render_exam_running():
         )
 
     st.progress(answered_count / total if total else 0)
-
-    st.markdown(
-        "<script>setTimeout(function(){window.parent.location.reload();},60000);</script>",
-        unsafe_allow_html=True,
-    )
 
     # ---- review mode ----
     if st.session_state.exam_review_mode:
@@ -1880,7 +1600,7 @@ def s_submissions():
 
 
 # ==============================================================================
-# ADMIN — EXAM & QUESTION MANAGEMENT (multi-set)
+# ADMIN — EXAM & QUESTION MANAGEMENT (multi-set, random pool)
 # ==============================================================================
 def s_question_management():
     header(
@@ -1897,7 +1617,8 @@ def s_question_management():
     bank = st.session_state.exam_bank
     st.info(
         "Changes made here are saved to `exam_bank.json` and take effect for all future exam attempts. "
-        "Each **exam set** is a separate pool of questions — candidates pick one set before starting."
+        "Each **exam set** is a pool of questions — candidates receive a **random sample** of the pool, "
+        "with options shuffled. Two candidates sitting at the same time see different papers."
     )
 
     tab_sets, tab_questions = st.tabs(["🗂 Exam Sets", "❓ Questions"])
@@ -1913,10 +1634,15 @@ def s_question_management():
         else:
             summary_rows = []
             for eid, edata in bank.items():
+                pool_n = len(edata.get("questions", []))
+                pick_n = edata.get("questions_to_pick", 0) or 0
+                if pick_n <= 0 or pick_n > pool_n:
+                    pick_n = pool_n
                 summary_rows.append({
                     "Exam ID": eid,
                     "Name": edata.get("name", eid),
-                    "Questions": len(edata.get("questions", [])),
+                    "Pool Size": pool_n,
+                    "Picked per Candidate": pick_n,
                     "Duration (min)": edata.get("duration_minutes", 30),
                     "Pass mark": f"{int(edata.get('pass_mark', 0.80) * 100)}%",
                 })
@@ -1931,6 +1657,7 @@ def s_question_management():
             )
             if edit_id and edit_id != "— select —":
                 edata = bank[edit_id]
+                pool_n = len(edata.get("questions", []))
 
                 with st.form(f"edit_exam_{edit_id}"):
                     new_name = st.text_input("Exam name", value=edata.get("name", edit_id))
@@ -1949,12 +1676,21 @@ def s_question_management():
                             value=int(edata.get("pass_mark", 0.80) * 100),
                             step=1,
                         )
+                    new_pick = st.number_input(
+                        "Questions to pick per candidate (0 = use all)",
+                        min_value=0, max_value=1000,
+                        value=int(edata.get("questions_to_pick", 0)),
+                        step=1,
+                        help=f"Currently the pool has {pool_n} questions. "
+                             f"Candidates will be given a random sample of this size.",
+                    )
                     save_edit = st.form_submit_button("💾 Save changes", type="primary", use_container_width=True)
 
                 if save_edit:
                     edata["name"] = new_name.strip() or edit_id
                     edata["duration_minutes"] = int(new_duration)
                     edata["pass_mark"] = round(float(new_pass) / 100.0, 4)
+                    edata["questions_to_pick"] = int(new_pick)
                     if save_exam_bank(bank):
                         st.success(f"✅ Updated **{edata['name']}**.")
                         st.rerun()
@@ -1972,7 +1708,6 @@ def s_question_management():
                 if st.button("🗑 Delete exam set", disabled=not confirm_del, type="secondary"):
                     bank.pop(edit_id, None)
                     if save_exam_bank(bank):
-                        # reset active selection if needed
                         if st.session_state.active_exam_id == edit_id:
                             st.session_state.active_exam_id = next(iter(bank.keys()), None)
                         st.success("Exam set deleted.")
@@ -1991,6 +1726,11 @@ def s_question_management():
                 n_duration = st.number_input("Duration (minutes)", min_value=1, max_value=300, value=30, step=1)
             with cc2:
                 n_pass = st.number_input("Pass mark (%)", min_value=1, max_value=100, value=80, step=1)
+            n_pick = st.number_input(
+                "Questions to pick per candidate (0 = use all)",
+                min_value=0, max_value=1000, value=DEFAULT_QUESTIONS_TO_PICK, step=1,
+                help="Candidates receive this many questions randomly sampled from the pool.",
+            )
             created = st.form_submit_button("➕ Create exam set", type="primary", use_container_width=True)
 
         if created:
@@ -2009,6 +1749,7 @@ def s_question_management():
                     "description": n_desc.strip(),
                     "duration_minutes": int(n_duration),
                     "pass_mark": round(float(n_pass) / 100.0, 4),
+                    "questions_to_pick": int(n_pick),
                     "questions": [],
                 }
                 if save_exam_bank(bank):
@@ -2028,7 +1769,6 @@ def s_question_management():
 
         # ---- pick which exam we're editing ----
         exam_ids = list(bank.keys())
-        # honour admin_selected_exam if it's valid
         if st.session_state.admin_selected_exam not in exam_ids:
             st.session_state.admin_selected_exam = exam_ids[0]
 
@@ -2253,7 +1993,8 @@ def s_title():
         card(
             "Graded final exam",
             f"<b>{len(st.session_state.exam_bank or {})} exam set(s)</b> available. "
-            "Shuffled questions and options, auto-submit on timeout, per-section performance breakdown. "
+            "A random subset of the pool is served to each candidate, "
+            "with questions and options shuffled, auto-submit on timeout, and a per-section breakdown. "
             "Your results are <b>recorded locally and can be downloaded</b>.",
             "card-navy",
         )
@@ -2274,7 +2015,7 @@ def s_title():
                     "Order the Workflow",
                     "Scenario Simulator",
                     "Final Compliance Checklist",
-                    "Graded Final Exam",
+                    "Graded Final Exam (random pool)",
                     "Progress Dashboard",
                 ],
                 "chip chip-navy",
@@ -3893,7 +3634,6 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🚪 Sign out", key="logout_btn"):
-        # Invalidate the persisted token first
         _clear_session_token()
         for k in list(_defaults.keys()):
             st.session_state.pop(k, None)
@@ -3901,18 +3641,6 @@ with st.sidebar:
             if key.startswith(("exam_radio_", "pal_", "typeq_", "ab_", "sc_", "pr_", "rev_", "nav_", "dev_ck_", "final_ck_", "wf_btn_")):
                 st.session_state.pop(key, None)
         st.rerun()
-
-    # if st.button("🔄 Reset everything", key="global_reset"):
-    #     st.session_state.scores = {}
-    #     st.session_state.dev_checklist = {}
-    #     st.session_state.final_checklist = {}
-    #     st.session_state.scenario_state = {}
-    #     st.session_state.pr_selected = set()
-    #     st.session_state.review_selected = set()
-    #     st.session_state.wf_clicked = []
-    #     st.session_state.celebrated = {"dev": False, "final": False}
-    #     _reset_exam()
-    #     st.rerun()
 
 
 # ==============================================================================
