@@ -89,7 +89,7 @@ hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
   position: sticky;
   top: 1000rem;                 /* pushed down — extra gap below the navbar */
   z-index: 200;
-  background: #F7FAFC;
+#   background: #F7FAFC;
   padding: 25px 0 14px 0;    /* top padding = the visible gap */
   margin: 0 0 8px 0;
   border-bottom: 2px solid var(--line);
