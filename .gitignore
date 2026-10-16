@@ -1,0 +1,22 @@
+# Streamlit secrets — never commit credentials
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit runtime
+.streamlit/*.log
+
+# Exam data (contains candidate PII — do not commit)
+exam_submissions.json
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

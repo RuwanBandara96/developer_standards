@@ -1,9 +1,11 @@
 # ==============================================================================
-#  DEVELOPER STANDARDS & DEVELOPMENT WORKFLOW — INTERACTIVE EDITION
-#  Gamified, quiz-driven, scenario-based presentation
+#  DEVELOPER STANDARDS & DEVELOPMENT WORKFLOW — INTERACTIVE EXAM EDITION
+#  Login + Graded Exam + Local Submission Storage + Admin Console
 # ------------------------------------------------------------------------------
-#  Run with:   streamlit run developer_standards.py
+#  Run with:   streamlit run developer.py
 #  Requires:   streamlit, pandas, numpy, plotly
+#
+#  Credentials are NOT stored in this file. They live in .streamlit/secrets.toml
 # ==============================================================================
 
 import streamlit as st
@@ -11,20 +13,25 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import re
+import os
+import json
+import time
 import random
+import html as html_lib
+from datetime import datetime
 
 # ------------------------------------------------------------------------------
 # PAGE CONFIG
 # ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Developer Standards — Interactive",
+    page_title="Developer Standards — Exam",
     page_icon="🛠️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ------------------------------------------------------------------------------
-# GLOBAL STYLE  (includes dark-theme fix)
+# GLOBAL STYLE
 # ------------------------------------------------------------------------------
 st.markdown(
     """
@@ -37,28 +44,22 @@ st.markdown(
 h1,h2,h3,h4{color:var(--navy);}
 hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
 
-/* ---------- DARK-THEME PROOFING ---------- */
-.card, .card *,
-.kpi,  .kpi *,
-.tree, .tree *,
-.do-box,   .do-box *,
-.dont-box, .dont-box *,
-.quiz-box, .quiz-box *,
-.pr-card,  .pr-card * {
+.card, .card *, .kpi, .kpi *, .tree, .tree *,
+.do-box, .do-box *, .dont-box, .dont-box *,
+.quiz-box, .quiz-box *, .pr-card, .pr-card *,
+.exam-card, .exam-card *, .exam-meta, .exam-meta * {
     color: #2B3A4A !important;
 }
 .card h4, .kpi .v, .quiz-box h4, .tree b,
-.card b, .card strong, .pr-card b, .pr-card strong { color: #0B3C5D !important; }
+.card b, .card strong, .pr-card b, .pr-card strong,
+.exam-card b, .exam-card strong { color: #0B3C5D !important; }
 .do-box h5   { color: #14615E !important; }
 .dont-box h5 { color: #9B2C2C !important; }
 .card i, .card em, .kpi .l, .pr-card i { color: #5A7184 !important; }
 .card code, .do-box code, .dont-box code, .quiz-box code,
-.tree code, .pr-card code {
-    background: #EEF2F6 !important;
-    color: #0B3C5D !important;
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: .85em;
+.tree code, .pr-card code, .exam-card code {
+    background: #EEF2F6 !important; color: #0B3C5D !important;
+    padding: 1px 6px; border-radius: 4px; font-size: .85em;
 }
 .chip      { color: #14615E !important; }
 .chip-navy { color: #0B3C5D !important; }
@@ -163,6 +164,37 @@ hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
 .pill-fail{background:#FDECEC;color:#9B2C2C;border:1px solid #F5C6C6;}
 .pill-mid{background:#FDF4E3;color:#8A6512;border:1px solid #F0D9A8;}
 
+/* LOGIN */
+.login-card{
+  background:#fff;border:1px solid var(--line);border-radius:16px;padding:26px 26px 10px 26px;
+  box-shadow:0 12px 34px rgba(11,60,93,.12);
+}
+.login-note{font-size:.76rem;color:#5A7184;line-height:1.5;}
+
+/* EXAM */
+.exam-card{
+  background:#fff;border:1px solid var(--line);border-left:6px solid var(--navy);
+  border-radius:12px;padding:20px 24px;box-shadow:0 3px 10px rgba(11,60,93,.08);
+}
+.exam-meta{
+  background:#F3F7FA;border:1px dashed #C6D6E4;border-radius:10px;
+  padding:10px 14px;font-size:.8rem;color:#2B3A4A;margin-bottom:14px;
+}
+.timer-box{
+  display:inline-block;background:#0B3C5D;color:#fff !important;padding:9px 20px;border-radius:10px;
+  font-weight:800;font-size:1.05rem;letter-spacing:1.5px;box-shadow:0 3px 10px rgba(11,60,93,.25);
+}
+.timer-warn{background:#C0392B !important;animation:pulse 1.2s infinite;}
+@keyframes pulse{0%{opacity:1}50%{opacity:.6}100%{opacity:1}}
+.qnum{
+  display:inline-block;background:#1D7874;color:#fff;font-size:.7rem;font-weight:800;
+  padding:3px 12px;border-radius:20px;letter-spacing:1px;
+}
+.user-badge{
+  background:rgba(255,255,255,.12);border-radius:10px;padding:10px 12px;margin-bottom:10px;
+  border:1px solid rgba(255,255,255,.18);
+}
+
 section[data-testid="stSidebar"]{background:#0B3C5D;}
 section[data-testid="stSidebar"] *{color:#EAF2F8 !important;}
 section[data-testid="stSidebar"] .stButton>button{
@@ -263,31 +295,255 @@ def score_pill(score, total):
     return f'<span class="score-pill {cls}">{score} / {total}</span>'
 
 
+def valid_email(addr: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", (addr or "").strip()))
+
+
+# ==============================================================================
+# AUTHENTICATION  (all credentials come from .streamlit/secrets.toml)
 # ------------------------------------------------------------------------------
-# SESSION STATE INIT
-# ------------------------------------------------------------------------------
-if "slide" not in st.session_state:
-    st.session_state.slide = 0
-if "scores" not in st.session_state:
-    st.session_state.scores = {}
-if "dev_checklist" not in st.session_state:
-    st.session_state.dev_checklist = {}
-if "final_checklist" not in st.session_state:
-    st.session_state.final_checklist = {}
-if "dev_notes" not in st.session_state:
-    st.session_state.dev_notes = ""
-if "final_notes" not in st.session_state:
-    st.session_state.final_notes = ""
-if "wf_clicked" not in st.session_state:
-    st.session_state.wf_clicked = []
-if "scenario_state" not in st.session_state:
-    st.session_state.scenario_state = {}
-if "pr_selected" not in st.session_state:
-    st.session_state.pr_selected = set()
-if "review_selected" not in st.session_state:
-    st.session_state.review_selected = set()
-if "celebrated" not in st.session_state:
-    st.session_state.celebrated = {"dev": False, "final": False}
+#  NO usernames or passwords are stored in this source file.
+#  Define every account under a [users.<username>] block in secrets.toml.
+# ==============================================================================
+ADMIN_ROLES = ("examiner", "admin", "super_admin")
+
+
+def _get_exam_access_code() -> str:
+    """Access code required for self-registration (from secrets, then env)."""
+    try:
+        code = st.secrets.get("exam", {}).get("access_code")
+        if code:
+            return str(code)
+    except Exception:
+        pass
+    return os.getenv("EXAM_ACCESS_CODE", "")
+
+
+def _get_users_from_secrets() -> dict:
+    """Read the [users.*] tables from st.secrets. Returns {} if not configured."""
+    users = {}
+    try:
+        secret_users = st.secrets.get("users", {})
+        for username, data in dict(secret_users).items():
+            users[str(username).strip().lower()] = dict(data)
+    except Exception:
+        pass
+    return users
+
+
+def users_configured() -> bool:
+    """True if at least one account is defined and at least one super_admin exists."""
+    users = _get_users_from_secrets()
+    if not users:
+        return False
+    return any((u.get("role") or "").lower() == "super_admin" for u in users.values())
+
+
+def load_users() -> dict:
+    """Return the effective user directory: secrets + in-session registrations."""
+    users = _get_users_from_secrets()
+    users.update(st.session_state.get("registered_users", {}))
+    return users
+
+
+def login_page():
+    st.markdown(
+        """
+        <div class="hero" style="padding:38px 34px;">
+            <div class="hero-kicker">Secure Access</div>
+            <div class="hero-title" style="font-size:2.3rem;">Developer Standards — Exam Portal</div>
+            <div class="hero-sub">Sign in to take the graded assessment.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # --- Hard stop if no accounts are configured in secrets ---
+    if not users_configured():
+        st.error(
+            "⚠️ **No accounts are configured.** Add a `.streamlit/secrets.toml` file "
+            "next to this script with at least one `super_admin` account. See the setup "
+            "instructions below."
+        )
+        with st.expander("📄 Required `.streamlit/secrets.toml` structure", expanded=True):
+            st.code(
+                """# .streamlit/secrets.toml
+
+[exam]
+access_code = "CHANGE-ME-2026"      # required for self-registration
+
+[users.superadmin]
+password = "ChangeMe@2026"
+name     = "Super Administrator"
+email    = "superadmin@yourcompany.com"
+role     = "super_admin"           # super_admin | admin | examiner | developer | qa
+
+[users.alice]
+password = "Alice@2026"
+name     = "Alice Smith"
+email    = "alice@yourcompany.com"
+role     = "developer"
+
+[users.bob]
+password = "Bob@2026"
+name     = "Bob Jones"
+email    = "bob@yourcompany.com"
+role     = "examiner"              # can view exam submissions
+""",
+                language="toml",
+            )
+            st.caption(
+                "Save the file, stop the Streamlit process (Ctrl + C), and start it again — "
+                "`secrets.toml` is only read at startup."
+            )
+        st.stop()
+
+    _, mid, _ = st.columns([1, 1.35, 1])
+    with mid:
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+        tab_in, tab_reg = st.tabs(["🔐 Sign in", "📝 Register"])
+
+        with tab_in:
+            with st.form("login_form", clear_on_submit=False):
+                username = st.text_input("Username", placeholder="your username")
+                password = st.text_input("Password", type="password", placeholder="••••••••")
+                st.checkbox("Keep me signed in for this session", value=True)
+                submit = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+
+            if submit:
+                users = load_users()
+                u = (username or "").strip().lower()
+                if not u or not password:
+                    st.error("Please enter both username and password.")
+                elif u in users and users[u].get("password") == password:
+                    st.session_state.authenticated = True
+                    st.session_state.user = {
+                        "username": u,
+                        "name": users[u].get("name", u),
+                        "email": users[u].get("email", ""),
+                        "role": (users[u].get("role") or "developer").lower(),
+                    }
+                    st.session_state.login_time = datetime.now().isoformat(timespec="seconds")
+                    st.success(f"Welcome, {st.session_state.user['name']}!")
+                    time.sleep(0.4)
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid username or password.")
+
+        with tab_reg:
+            with st.form("register_form", clear_on_submit=False):
+                r_name = st.text_input("Full name")
+                r_email = st.text_input("Email address")
+                r_user = st.text_input("Choose a username")
+                r_pass = st.text_input("Choose a password", type="password")
+                r_code = st.text_input("Exam access code", type="password")
+                st.caption("New registrations are always created with the **developer** role.")
+                r_submit = st.form_submit_button("Create account", type="primary", use_container_width=True)
+
+            if r_submit:
+                errs = []
+                if not r_name.strip():
+                    errs.append("Full name is required.")
+                if not valid_email(r_email):
+                    errs.append("A valid email address is required.")
+                if len(r_user.strip()) < 3:
+                    errs.append("Username must be at least 3 characters.")
+                if len(r_pass) < 6:
+                    errs.append("Password must be at least 6 characters.")
+                if r_code.strip() != _get_exam_access_code():
+                    errs.append("Invalid exam access code.")
+                if r_user.strip().lower() in load_users():
+                    errs.append("That username is already taken.")
+
+                if errs:
+                    for e in errs:
+                        st.error(f"❌ {e}")
+                else:
+                    st.session_state.registered_users[r_user.strip().lower()] = {
+                        "password": r_pass,
+                        "name": r_name.strip(),
+                        "email": r_email.strip(),
+                        "role": "developer",     # role is enforced — never user-controlled
+                    }
+                    st.success("✅ Account created. Switch to the **Sign in** tab and log in.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown(
+        '<div style="text-align:center;margin-top:26px;color:#5A7184;font-size:.8rem;">'
+        "Developer Standards &amp; Development Workflow · Mandatory for all team members"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ==============================================================================
+# SUBMISSION STORAGE
+# ==============================================================================
+SUBMISSIONS_PATH = "exam_submissions.json"
+
+
+def save_submission(record: dict) -> bool:
+    try:
+        data = []
+        if os.path.exists(SUBMISSIONS_PATH):
+            with open(SUBMISSIONS_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        data.append(record)
+        with open(SUBMISSIONS_PATH, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, default=str)
+        return True
+    except Exception:
+        return False
+
+
+def load_submissions():
+    if not os.path.exists(SUBMISSIONS_PATH):
+        return []
+    try:
+        with open(SUBMISSIONS_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return []
+
+
+# ==============================================================================
+# SESSION STATE
+# ==============================================================================
+_defaults = {
+    "slide": 0,
+    "scores": {},
+    "dev_checklist": {},
+    "final_checklist": {},
+    "dev_notes": "",
+    "final_notes": "",
+    "wf_clicked": [],
+    "scenario_state": {},
+    "pr_selected": set(),
+    "review_selected": set(),
+    "celebrated": {"dev": False, "final": False},
+    # auth
+    "authenticated": False,
+    "user": None,
+    "registered_users": {},
+    "login_time": None,
+    # exam
+    "exam_started": False,
+    "exam_submitted": False,
+    "exam_paper": [],
+    "exam_answers": {},
+    "exam_idx": 0,
+    "exam_start_ts": None,
+    "exam_end_ts": None,
+    "exam_results": [],
+    "exam_score": 0,
+    "exam_attempts": 0,
+    "exam_agree": False,
+    "exam_review_mode": False,
+}
+for _k, _v in _defaults.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 
 def record_score(key, value, total):
@@ -301,15 +557,1096 @@ def total_score():
 
 
 # ==============================================================================
+# EXAM QUESTION BANK
+# ==============================================================================
+EXAM_CONFIG = {
+    "duration_minutes": 30,
+    "pass_mark": 0.80,
+    "shuffle_questions": True,
+    "shuffle_options": True,
+}
+
+EXAM_QUESTIONS = [
+    # ---------------- Section 1 — Purpose & Governance ----------------
+    {
+        "id": "Q01",
+        "section": "1. Purpose & Governance",
+        "question": "Who is responsible for verifying a developer's own implementation before the PR is raised or the work is handed to QA?",
+        "options": [
+            "The QA team, because verification is their primary responsibility",
+            "The technical lead who reviews the pull request",
+            "The developer who wrote the code",
+            "The automated test suite",
+        ],
+        "answer": "The developer who wrote the code",
+        "explanation": "Developer testing is a mandatory pre-PR step. QA must never be the first stage of meaningful testing.",
+    },
+    {
+        "id": "Q02",
+        "section": "1. Purpose & Governance",
+        "question": "Which statement about these development standards is correct?",
+        "options": [
+            "They are optional guidelines that apply to new projects only",
+            "They are mandatory for all new development work and applicable maintenance changes",
+            "They apply only to backend TypeScript services",
+            "They apply only when the technical lead explicitly requests them",
+        ],
+        "answer": "They are mandatory for all new development work and applicable maintenance changes",
+        "explanation": "The standards are mandatory across implementation, testing, code review and deployment.",
+    },
+    # ---------------- Section 2 — TypeScript ----------------
+    {
+        "id": "Q03",
+        "section": "2. TypeScript Type Safety",
+        "question": "Which type is the type-safe counterpart of `any` and should be used when a value's type is genuinely unknown?",
+        "options": ["`never`", "`unknown`", "`object`", "`{}`"],
+        "answer": "`unknown`",
+        "explanation": "`unknown` forces validation or narrowing before use, whereas `any` disables type checking entirely.",
+    },
+    {
+        "id": "Q04",
+        "section": "2. TypeScript Type Safety",
+        "question": "If `any` is genuinely required (for example at a third-party boundary), what is the correct behaviour?",
+        "options": [
+            "Use it freely — no explanation is needed",
+            "Document the reason and keep the usage limited to that boundary",
+            "Replace it with `object` to silence the linter",
+            "Add `// @ts-ignore` on the line above instead",
+        ],
+        "answer": "Document the reason and keep the usage limited to that boundary",
+        "explanation": "Only documented, boundary-limited `any` usage is acceptable. Undocumented, spread-out `any` is not.",
+    },
+    {
+        "id": "Q05",
+        "section": "2. TypeScript Type Safety",
+        "question": "Which of the following is NOT a required check before requesting a PR review?",
+        "options": [
+            "TypeScript type checks pass",
+            "Relevant lint checks pass",
+            "Every single function has a dedicated unit test",
+            "API request and response types match the actual data structures",
+        ],
+        "answer": "Every single function has a dedicated unit test",
+        "explanation": "100% unit-test coverage is not required. Meaningful tests for business rules, edge cases and error scenarios are expected.",
+    },
+    {
+        "id": "Q06",
+        "section": "2. TypeScript Type Safety",
+        "question": "What is the correct replacement for `Promise<any>` in a service method that returns a loan?",
+        "options": [
+            "`Promise<object>`",
+            "`Promise<LoanResponse>` using a defined interface",
+            "`Promise<void>`",
+            "`Promise<Array<any>>`",
+        ],
+        "answer": "`Promise<LoanResponse>` using a defined interface",
+        "explanation": "Define an explicit interface or type alias describing the real shape of the returned data.",
+    },
+    {
+        "id": "Q07",
+        "section": "2. TypeScript Type Safety",
+        "question": "What is the main problem with `const data = await res.json() as any;`?",
+        "options": [
+            "It is slower at runtime",
+            "It asserts a shape that was never validated, hiding mismatches between the API contract and the code",
+            "It breaks the build",
+            "It is not valid TypeScript syntax",
+        ],
+        "answer": "It asserts a shape that was never validated, hiding mismatches between the API contract and the code",
+        "explanation": "Use `unknown` and validate with a type guard or schema before using the data.",
+    },
+    {
+        "id": "Q08",
+        "section": "2. TypeScript Type Safety",
+        "question": "How should monetary / Decimal values be handled?",
+        "options": [
+            "Convert them to a JavaScript number as early as possible",
+            "Keep them as Decimal and pass them through the standard type-safe converters (e.g. `withOptionalCheckDecimal`)",
+            "Store them as strings and parse them on the client",
+            "Round them to two decimal places immediately",
+        ],
+        "answer": "Keep them as Decimal and pass them through the standard type-safe converters (e.g. `withOptionalCheckDecimal`)",
+        "explanation": "Casting Decimal to number loses precision — a serious defect in financial systems.",
+    },
+    # ---------------- Section 3 — Git workflow ----------------
+    {
+        "id": "Q09",
+        "section": "3. Git Branching & Workflow",
+        "question": "You have been assigned issue #4471 (a new feature). What is the correct working branch name?",
+        "options": ["feature/4471", "feature-4471", "4471-feature", "dev/feature/4471"],
+        "answer": "feature/4471",
+        "explanation": "Feature branches follow `feature/<issue-id>`. Bug fixes follow `bugfix/<issue-id>`.",
+    },
+    {
+        "id": "Q10",
+        "section": "3. Git Branching & Workflow",
+        "question": "Where must the working branch be created from?",
+        "options": [
+            "The latest `dev` branch",
+            "`main`, because it is the most stable",
+            "`qa`, because QA will test it",
+            "Whatever local branch is currently checked out",
+        ],
+        "answer": "The latest `dev` branch",
+        "explanation": "Always `git fetch` and branch from the latest approved `dev`.",
+    },
+    {
+        "id": "Q11",
+        "section": "3. Git Branching & Workflow",
+        "question": "What is the initial PR target for a feature branch?",
+        "options": ["main", "dev", "qa", "Whichever branch QA asks for"],
+        "answer": "dev",
+        "explanation": "The initial PR must target `dev`. Direct feature → QA merges are prohibited.",
+    },
+    {
+        "id": "Q12",
+        "section": "3. Git Branching & Workflow",
+        "question": "Which merge is NOT permitted under the standard workflow?",
+        "options": [
+            "feature/4471 → dev",
+            "dev → qa via a separate promotion PR",
+            "feature/4471 → qa directly",
+            "bugfix/4472 → dev",
+        ],
+        "answer": "feature/4471 → qa directly",
+        "explanation": "Only `dev` → `qa` promotions are permitted. Feature branches never merge straight into QA.",
+    },
+    {
+        "id": "Q13",
+        "section": "3. Git Branching & Workflow",
+        "question": "You still have a local `feature/4001` that has not been synced for three weeks. What should you do before starting new work?",
+        "options": [
+            "Branch from it — it already contains your earlier work",
+            "Do not branch from it; fetch origin and create the new branch from the latest `dev`",
+            "Rebase it onto `main` and continue from there",
+            "Delete the whole repository and clone it again",
+        ],
+        "answer": "Do not branch from it; fetch origin and create the new branch from the latest `dev`",
+        "explanation": "Never branch from a stale local branch — you would inherit obsolete code and merge conflicts.",
+    },
+    # ---------------- Section 4 — Developer testing ----------------
+    {
+        "id": "Q14",
+        "section": "4. Developer Testing",
+        "question": "When must developer testing be completed?",
+        "options": [
+            "After QA raises defects",
+            "Before the PR is created and before QA handover",
+            "Only when the technical lead asks for it",
+            "After the code has been merged into dev",
+        ],
+        "answer": "Before the PR is created and before QA handover",
+        "explanation": "Self-verification is a gate that must be passed before the PR is raised.",
+    },
+    {
+        "id": "Q15",
+        "section": "4. Developer Testing",
+        "question": "Lint reports two new errors introduced by your change and the release is due today. What do you do?",
+        "options": [
+            "Merge now and fix it on Monday",
+            "Add `eslint-disable` comments so the checks pass, then merge",
+            "Resolve the errors before merging, even if it delays the merge",
+            "Ask QA to ignore the lint failures for this release",
+        ],
+        "answer": "Resolve the errors before merging, even if it delays the merge",
+        "explanation": "Deadlines never justify bypassing required lint, type or build checks.",
+    },
+    {
+        "id": "Q16",
+        "section": "4. Developer Testing",
+        "question": "QA reports a defect that your own testing should have caught. What is the expected response?",
+        "options": [
+            "Reply 'works on my machine' and ask them to retest",
+            "Fix it, add a regression test, and strengthen your pre-handover testing",
+            "Raise a new bug and let QA prioritise it",
+            "Blame the requirements for not mentioning the case",
+        ],
+        "answer": "Fix it, add a regression test, and strengthen your pre-handover testing",
+        "explanation": "Own the defect: fix it, add regression coverage, and prevent the same class of issue recurring.",
+    },
+    {
+        "id": "Q17",
+        "section": "4. Developer Testing",
+        "question": "Which of these is NOT part of the developer's pre-PR verification checklist?",
+        "options": [
+            "Verifying API requests and responses",
+            "Validating database operations and returned data",
+            "Testing permissions and access restrictions",
+            "Waiting for the QA team to run the regression pack first",
+        ],
+        "answer": "Waiting for the QA team to run the regression pack first",
+        "explanation": "QA is a downstream gate — it is never a substitute for developer self-verification.",
+    },
+    # ---------------- Section 5 & 6 — SQL / performance ----------------
+    {
+        "id": "Q18",
+        "section": "5. SQL Performance",
+        "question": "What volume of dummy records is recommended when preparing performance test data?",
+        "options": ["100–200", "500–800", "2,000–3,000", "At least 1,000,000"],
+        "answer": "2,000–3,000",
+        "explanation": "2,000–3,000 representative rows give meaningful performance signal without excessive setup cost.",
+    },
+    {
+        "id": "Q19",
+        "section": "5. SQL Performance",
+        "question": "In a MySQL execution plan, what does `type: ALL` mean?",
+        "options": [
+            "All columns are being returned",
+            "A full table scan is being performed because no usable index was selected",
+            "All available indexes were used",
+            "The query result was served from cache",
+        ],
+        "answer": "A full table scan is being performed because no usable index was selected",
+        "explanation": "`type: ALL` is a red flag on large tables — review the WHERE / JOIN / ORDER BY columns and add an index.",
+    },
+    {
+        "id": "Q20",
+        "section": "5. SQL Performance",
+        "question": "A plan shows `Using temporary; Using filesort` on a GROUP BY query over millions of rows. What does this indicate?",
+        "options": [
+            "The query is optimal",
+            "The database is building a temporary table and sorting in memory, usually because of a missing or unsuitable index",
+            "The result set is empty",
+            "The connection pool is exhausted",
+        ],
+        "answer": "The database is building a temporary table and sorting in memory, usually because of a missing or unsuitable index",
+        "explanation": "Add an index covering the join/group columns, or pre-aggregate into a summary table.",
+    },
+    {
+        "id": "Q21",
+        "section": "6. Query Efficiency",
+        "question": "For an endpoint returning 100 rows from a very large table, which approach is faster?",
+        "options": [
+            "TypeORM QueryBuilder with several `leftJoinAndSelect` calls and `getMany()`",
+            "Raw SQL selecting only the required columns with an explicit `LIMIT`",
+            "Loading all entities and slicing them in the application",
+            "Fetching with `SELECT *` and filtering in code",
+        ],
+        "answer": "Raw SQL selecting only the required columns with an explicit `LIMIT`",
+        "explanation": "Retrieve only what you need. Eager-loading full entities across multiple joins transfers far more data than required.",
+    },
+    {
+        "id": "Q22",
+        "section": "6. Query Efficiency",
+        "question": "Why is `SELECT *` discouraged in production queries?",
+        "options": [
+            "It is invalid SQL",
+            "It retrieves columns that are not needed, increasing I/O, network and hydration cost",
+            "It always causes a full table scan",
+            "It prevents parameterisation",
+        ],
+        "answer": "It retrieves columns that are not needed, increasing I/O, network and hydration cost",
+        "explanation": "List columns explicitly — ideally through a mapper schema — so only required data is retrieved.",
+    },
+    {
+        "id": "Q23",
+        "section": "6. Query Efficiency",
+        "question": "What is the problem with running one query per row inside a `for` loop?",
+        "options": [
+            "It causes a deadlock — fix it with a transaction",
+            "It is an N+1 query problem — fix it with a JOIN or a batched `IN (...)` query",
+            "It causes a race condition — fix it with a mutex",
+            "It leaks memory — fix it with pagination",
+        ],
+        "answer": "It is an N+1 query problem — fix it with a JOIN or a batched `IN (...)` query",
+        "explanation": "One query per row multiplies round-trips. Batch or join instead.",
+    },
+    # ---------------- Section 7 — Code review ----------------
+    {
+        "id": "Q24",
+        "section": "7. Code Review & PR Quality",
+        "question": "Which combination must a pull request contain in order to be reviewable?",
+        "options": [
+            "Only the code changes",
+            "A linked issue, a clear description of the implementation, testing evidence, and the required approvals",
+            "A screenshot of the IDE",
+            "A verbal summary given to the technical lead",
+        ],
+        "answer": "A linked issue, a clear description of the implementation, testing evidence, and the required approvals",
+        "explanation": "All four elements are required before a PR can be merged.",
+    },
+    {
+        "id": "Q25",
+        "section": "7. Code Review & PR Quality",
+        "question": "In the non-compliant PR, the clause `WHERE a.name LIKE '%${search}%'` is used. What is the most severe problem?",
+        "options": [
+            "It is slower than a parameterised query",
+            "It is vulnerable to SQL injection because user input is interpolated directly into the SQL string",
+            "It returns too many columns",
+            "It uses a reserved keyword",
+        ],
+        "answer": "It is vulnerable to SQL injection because user input is interpolated directly into the SQL string",
+        "explanation": "Always use parameterised queries with `?` placeholders — never string interpolation.",
+    },
+    {
+        "id": "Q26",
+        "section": "7. Code Review & PR Quality",
+        "question": "Is using raw SQL instead of an ORM repository a standards violation?",
+        "options": [
+            "Yes, always — ORM repositories are mandatory",
+            "No — raw SQL is acceptable and is often preferred for performance-sensitive queries",
+            "Yes, unless QA approves it",
+            "Only for SELECT statements",
+        ],
+        "answer": "No — raw SQL is acceptable and is often preferred for performance-sensitive queries",
+        "explanation": "Section 6.1 explicitly prefers raw SQL where performance matters. Raw SQL itself is compliant; unsafe, untyped raw SQL is not.",
+    },
+    {
+        "id": "Q27",
+        "section": "7. Code Review & PR Quality",
+        "question": "A PR targets `qa`, has 0 approvals, failed lint, and three TypeScript errors suppressed with `as any`. What is the correct reviewer action?",
+        "options": [
+            "Approve it — the author said it works locally",
+            "Reject / request changes: wrong target branch, no approvals, failing checks and bypassed type safety",
+            "Merge it and raise a follow-up ticket for the issues",
+            "Ask QA to test it directly on the branch",
+        ],
+        "answer": "Reject / request changes: wrong target branch, no approvals, failing checks and bypassed type safety",
+        "explanation": "Reviewers must enforce every requirement — not just the code logic.",
+    },
+    # ---------------- Section 8 — Automated testing ----------------
+    {
+        "id": "Q28",
+        "section": "8. Automated Testing",
+        "question": "An automated test fails on staging but passed locally. What is the correct action?",
+        "options": [
+            "Increase the test timeout and rerun",
+            "Disable the test until someone investigates it",
+            "Investigate and identify the root cause (implementation, test, configuration or environment), fix it and rerun",
+            "Ask QA to rerun it later",
+        ],
+        "answer": "Investigate and identify the root cause (implementation, test, configuration or environment), fix it and rerun",
+        "explanation": "Never treat a symptom. Investigate first — environment and data volume differences are common causes.",
+    },
+    {
+        "id": "Q29",
+        "section": "8. Automated Testing",
+        "question": "Is it acceptable to skip or disable a failing automated test to unblock a release?",
+        "options": [
+            "Yes, if the release is urgent",
+            "Yes, if the test is flaky",
+            "No — failures must be investigated and resolved; disabling tests is never the correct response",
+            "Only with QA approval",
+        ],
+        "answer": "No — failures must be investigated and resolved; disabling tests is never the correct response",
+        "explanation": "Bypassing required checks is explicitly prohibited.",
+    },
+    # ---------------- Section 9 & 10 — Workflow & accountability ----------------
+    {
+        "id": "Q30",
+        "section": "9. Development Workflow",
+        "question": "Which is the correct FIRST step of the development workflow?",
+        "options": ["Branch preparation", "Requirement analysis", "Implementation", "Pull request to DEV"],
+        "answer": "Requirement analysis",
+        "explanation": "Everything starts with understanding the requirement and acceptance criteria.",
+    },
+    {
+        "id": "Q31",
+        "section": "9. Development Workflow",
+        "question": "Choose the correct order of the workflow.",
+        "options": [
+            "Branch Preparation → Requirement Analysis → Implementation → PR to DEV → Developer Validation → Merge to DEV → QA Promotion → Automated Testing & Staging",
+            "Requirement Analysis → Branch Preparation → Implementation → Developer Validation → PR to DEV → Merge to DEV → QA Promotion → Automated Testing & Staging",
+            "Requirement Analysis → Implementation → Branch Preparation → Developer Validation → Merge to DEV → PR to DEV → QA Promotion → Automated Testing & Staging",
+            "Requirement Analysis → Branch Preparation → Implementation → PR to DEV → Developer Validation → Merge to DEV → Automated Testing & Staging → QA Promotion",
+        ],
+        "answer": "Requirement Analysis → Branch Preparation → Implementation → Developer Validation → PR to DEV → Merge to DEV → QA Promotion → Automated Testing & Staging",
+        "explanation": "Developer validation always precedes the PR; promotion to QA happens after the dev merge.",
+    },
+    {
+        "id": "Q32",
+        "section": "10. Developer Accountability",
+        "question": "Which of the following is explicitly NOT acceptable?",
+        "options": [
+            "Using `unknown` together with runtime validation",
+            "Opening an initial PR against `dev`",
+            "Sending an initial feature PR directly to `qa`",
+            "Adding parameterised queries",
+        ],
+        "answer": "Sending an initial feature PR directly to `qa`",
+        "explanation": "Direct feature → QA merges are prohibited. Only `dev` → `qa` promotions are permitted.",
+    },
+    {
+        "id": "Q33",
+        "section": "10. Developer Accountability",
+        "question": "A report query runs in 200 ms on dev with 500 rows, but staging holds 3 million rows. What should you do before opening the PR?",
+        "options": [
+            "Ship it — 200 ms is fast enough and staging is just slow",
+            "Add a cache layer and hope for the best",
+            "Run `EXPLAIN ANALYZE` with 2,000–3,000 representative rows, attach the evidence to the issue, and fix any bottlenecks",
+            "Move the aggregation into the application layer so the database does less work",
+        ],
+        "answer": "Run `EXPLAIN ANALYZE` with 2,000–3,000 representative rows, attach the evidence to the issue, and fix any bottlenecks",
+        "explanation": "Performance must be validated with realistic data, and the evidence attached to the Git issue.",
+    },
+]
+
+
+def _build_exam_paper():
+    paper = []
+    for q in EXAM_QUESTIONS:
+        opts = list(q["options"])
+        if EXAM_CONFIG["shuffle_options"]:
+            random.shuffle(opts)
+        paper.append({**q, "options": opts})
+    if EXAM_CONFIG["shuffle_questions"]:
+        random.shuffle(paper)
+    return paper
+
+
+def _exam_remaining_seconds():
+    if not st.session_state.exam_started or not st.session_state.exam_start_ts:
+        return EXAM_CONFIG["duration_minutes"] * 60
+    elapsed = time.time() - st.session_state.exam_start_ts
+    return max(0, EXAM_CONFIG["duration_minutes"] * 60 - elapsed)
+
+
+def _reset_exam():
+    st.session_state.exam_started = False
+    st.session_state.exam_submitted = False
+    st.session_state.exam_paper = []
+    st.session_state.exam_answers = {}
+    st.session_state.exam_idx = 0
+    st.session_state.exam_start_ts = None
+    st.session_state.exam_end_ts = None
+    st.session_state.exam_results = []
+    st.session_state.exam_score = 0
+    st.session_state.exam_agree = False
+    st.session_state.exam_review_mode = False
+
+
+def _grade_exam():
+    paper = st.session_state.exam_paper
+    answers = st.session_state.exam_answers
+    results = []
+    for i, q in enumerate(paper):
+        given = answers.get(q["id"])
+        correct = (given == q["answer"])
+        results.append({
+            "n": i + 1,
+            "id": q["id"],
+            "section": q["section"],
+            "question": q["question"],
+            "given": given,
+            "answer": q["answer"],
+            "correct": correct,
+            "explanation": q["explanation"],
+        })
+    score = sum(1 for r in results if r["correct"])
+    st.session_state.exam_results = results
+    st.session_state.exam_score = score
+    st.session_state.exam_submitted = True
+    st.session_state.exam_end_ts = time.time()
+    st.session_state.exam_attempts += 1
+    record_score("exam", score, len(results))
+
+    duration = st.session_state.exam_end_ts - (st.session_state.exam_start_ts or st.session_state.exam_end_ts)
+    save_submission({
+        "user": st.session_state.user,
+        "submitted_at": datetime.now().isoformat(timespec="seconds"),
+        "score": score,
+        "total": len(results),
+        "percent": round(score / len(results) * 100, 2) if results else 0,
+        "attempt": st.session_state.exam_attempts,
+        "duration_seconds": int(duration),
+        "answers": [{"id": r["id"], "given": r["given"], "correct": r["correct"]} for r in results],
+    })
+    return results, score
+
+
+# ==============================================================================
+# EXAM SLIDE
+# ==============================================================================
+def s_exam():
+    header(
+        "Final Exam — Developer Standards",
+        "Graded assessment · your results are recorded and can be downloaded",
+        "EXAM",
+    )
+
+    if st.session_state.exam_submitted:
+        _render_exam_results()
+        return
+    if not st.session_state.exam_started:
+        _render_exam_intro()
+        return
+    _render_exam_running()
+
+
+def _render_exam_intro():
+    total = len(EXAM_QUESTIONS)
+    st.markdown("### 📋 Exam instructions")
+    c1, c2 = st.columns([1.25, 1])
+    with c1:
+        st.markdown(
+            f"""
+            <div class="exam-card">
+              <h4 style="color:#0B3C5D;margin-top:0;">Before you begin</h4>
+              <ul style="font-size:.88rem;line-height:1.85;margin:0;padding-left:20px;">
+                <li>The exam contains <b>{total} multiple-choice questions</b> covering every section of the standards.</li>
+                <li>You have <b>{EXAM_CONFIG['duration_minutes']} minutes</b>. The exam auto-submits when the timer reaches zero.</li>
+                <li>The pass mark is <b>{int(EXAM_CONFIG['pass_mark']*100)}%</b>. Each question is worth one mark.</li>
+                <li>Questions and answer options are <b>shuffled</b> for every attempt.</li>
+                <li>You can move backwards and forwards and change answers until you submit.</li>
+                <li>Once submitted, your answers are locked and your results can be downloaded.</li>
+                <li>No negative marking — always answer every question.</li>
+              </ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c2:
+        kpi_row([("Questions", str(total)), ("Duration", f"{EXAM_CONFIG['duration_minutes']} min")])
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        kpi_row([("Pass mark", f"{int(EXAM_CONFIG['pass_mark']*100)}%"), ("Attempts", str(st.session_state.exam_attempts))])
+
+    st.markdown("---")
+    st.markdown("#### ✍️ Candidate")
+    u = st.session_state.user or {}
+    kpi_row([
+        ("Name", u.get("name", "—")),
+        ("Username", u.get("username", "—")),
+        ("Email", u.get("email", "—")),
+        ("Role", (u.get("role") or "—").upper()),
+    ])
+
+    st.markdown("---")
+    agree = st.checkbox(
+        "I confirm I am taking this exam as myself and I have read the instructions.",
+        key="exam_agree",
+    )
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        start = st.button("🚀 Start exam", type="primary", use_container_width=True, disabled=not agree)
+    with c2:
+        if st.session_state.exam_attempts > 0:
+            st.caption(f"You have completed {st.session_state.exam_attempts} attempt(s). Retaking is allowed; your latest score is recorded.")
+
+    if start:
+        st.session_state.exam_paper = _build_exam_paper()
+        st.session_state.exam_answers = {}
+        st.session_state.exam_idx = 0
+        st.session_state.exam_started = True
+        st.session_state.exam_submitted = False
+        st.session_state.exam_start_ts = time.time()
+        st.session_state.exam_review_mode = False
+        st.rerun()
+
+
+def _render_exam_running():
+    paper = st.session_state.exam_paper
+    total = len(paper)
+
+    # ---- timer ----
+    remaining = _exam_remaining_seconds()
+    if remaining <= 0:
+        _grade_exam()
+        st.warning("⏰ Time is up — your exam was submitted automatically.")
+        st.rerun()
+
+    mins, secs = divmod(int(remaining), 60)
+    answered_count = sum(1 for q in paper if st.session_state.exam_answers.get(q["id"]))
+
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        warn = " timer-warn" if remaining < 300 else ""
+        st.markdown(
+            f'<div class="timer-box{warn}">⏱ {mins:02d}:{secs:02d}</div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            f'<div class="kpi"><div class="v">{answered_count} / {total}</div>'
+            f'<div class="l">Answered</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c3:
+        label = "Review" if st.session_state.exam_review_mode else f"{st.session_state.exam_idx + 1} / {total}"
+        st.markdown(
+            f'<div class="kpi"><div class="v">{label}</div>'
+            f'<div class="l">Current</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.progress(answered_count / total if total else 0)
+
+    st.markdown(
+        "<script>setTimeout(function(){window.parent.location.reload();},60000);</script>",
+        unsafe_allow_html=True,
+    )
+
+    # =========================================================================
+    # REVIEW MODE  (must run BEFORE we touch paper[idx])
+    # =========================================================================
+    if st.session_state.exam_review_mode:
+        st.markdown("---")
+        st.markdown("### 📋 Review your answers")
+
+        unanswered = [i for i, qq in enumerate(paper) if not st.session_state.exam_answers.get(qq["id"])]
+        if unanswered:
+            st.warning(
+                f"⚠️ You have **{len(unanswered)}** unanswered question(s): "
+                + ", ".join(str(i + 1) for i in unanswered)
+            )
+        else:
+            st.success("✅ All questions answered.")
+
+        rows = []
+        for i, qq in enumerate(paper):
+            given = st.session_state.exam_answers.get(qq["id"])
+            rows.append({
+                "#": i + 1,
+                "Section": qq["section"],
+                "Your answer": given or "— not answered —",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+        confirm = st.checkbox(
+            "I understand that once submitted my answers are final.",
+            key="exam_confirm_final",
+        )
+        cc1, cc2 = st.columns([1, 1])
+        with cc1:
+            if st.button("✅ Submit exam", type="primary", use_container_width=True, disabled=not confirm):
+                _grade_exam()
+                st.rerun()
+        with cc2:
+            if st.button("↩ Back to questions", use_container_width=True):
+                st.session_state.exam_review_mode = False
+                if st.session_state.exam_idx >= total:
+                    st.session_state.exam_idx = max(0, total - 1)
+                st.rerun()
+        return
+
+    # =========================================================================
+    # NORMAL QUESTION MODE
+    # =========================================================================
+    idx = st.session_state.exam_idx
+    if idx < 0:
+        idx = 0
+    if idx >= total:
+        idx = total - 1
+    st.session_state.exam_idx = idx
+
+    st.markdown("---")
+    st.markdown("##### Question navigator")
+    nav_cols = st.columns(min(12, total))
+    for i in range(total):
+        qid = paper[i]["id"]
+        is_answered = st.session_state.exam_answers.get(qid) is not None
+        label = f"{'✓' if is_answered else '○'} {i+1}"
+        if nav_cols[i % len(nav_cols)].button(
+            label,
+            key=f"pal_{i}",
+            use_container_width=True,
+            type="primary" if i == idx else "secondary",
+        ):
+            st.session_state.exam_idx = i
+            st.rerun()
+
+    st.markdown("---")
+
+    q = paper[idx]
+    st.markdown(
+        f'<div class="exam-card">'
+        f'<span class="qnum">QUESTION {idx + 1} OF {total}</span>'
+        f'<div style="font-size:.72rem;color:#5A7184;letter-spacing:1px;margin-top:8px;'
+        f'text-transform:uppercase;font-weight:700;">{html_lib.escape(q["section"])}</div>'
+        f'<div style="font-size:1.05rem;font-weight:700;color:#0B3C5D;margin-top:8px;line-height:1.5;">'
+        f'{html_lib.escape(q["question"])}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    prev_answer = st.session_state.exam_answers.get(q["id"])
+    opts = q["options"]
+    default_index = opts.index(prev_answer) if prev_answer in opts else None
+
+    choice = st.radio(
+        "Select one answer",
+        opts,
+        index=default_index,
+        key=f"exam_radio_{q['id']}",
+        label_visibility="collapsed",
+    )
+    st.session_state.exam_answers[q["id"]] = choice
+
+    st.markdown("---")
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    with c1:
+        if st.button("⬅ Previous", use_container_width=True, disabled=idx == 0):
+            st.session_state.exam_idx = max(0, idx - 1)
+            st.rerun()
+    with c2:
+        if st.button("Next ➡", use_container_width=True, disabled=idx >= total - 1):
+            st.session_state.exam_idx = min(total - 1, idx + 1)
+            st.rerun()
+    with c3:
+        if st.button("🧹 Clear answer", use_container_width=True):
+            st.session_state.exam_answers[q["id"]] = None
+            st.rerun()
+    with c4:
+        if st.button("📋 Review & submit", use_container_width=True, type="primary"):
+            st.session_state.exam_review_mode = True
+            st.rerun()
+
+
+def _render_exam_results():
+    results = st.session_state.exam_results
+    score = st.session_state.exam_score
+    total = len(results)
+    pct = score / total * 100 if total else 0
+    passed = pct >= EXAM_CONFIG["pass_mark"] * 100
+
+    duration_secs = int((st.session_state.exam_end_ts or 0) - (st.session_state.exam_start_ts or 0))
+    duration_txt = f"{duration_secs // 60} min {duration_secs % 60} sec"
+
+    if passed:
+        st.success(f"🏆 **PASSED** — {score}/{total} ({pct:.1f}%). Excellent work.")
+        st.balloons()
+    else:
+        st.error(f"❌ **NOT PASSED** — {score}/{total} ({pct:.1f}%). The pass mark is {int(EXAM_CONFIG['pass_mark']*100)}%.")
+
+    kpi_row([
+        ("Score", f"{score} / {total}"),
+        ("Percentage", f"{pct:.1f}%"),
+        ("Pass mark", f"{int(EXAM_CONFIG['pass_mark']*100)}%"),
+        ("Time taken", duration_txt),
+    ])
+
+    st.progress(min(pct / 100, 1.0))
+    st.markdown("---")
+
+    # ---- per-section breakdown (uses lowercase 'section' key) ----
+    df = pd.DataFrame(results)
+    sec = (
+        df.groupby("section")
+          .agg(Correct=("correct", "sum"), Total=("correct", "count"))
+          .reset_index()
+          .rename(columns={"section": "Section"})
+    )
+    sec["Percent"] = (sec["Correct"] / sec["Total"] * 100).round(1)
+    sec["Status"] = sec["Percent"].apply(lambda v: "✅ Pass" if v >= 80 else ("⚠️ Partial" if v >= 50 else "❌ Weak"))
+
+    c1, c2 = st.columns([1, 1.15])
+    with c1:
+        st.markdown("#### Performance by section")
+        st.dataframe(sec, hide_index=True, use_container_width=True)
+    with c2:
+        st.markdown("#### Section chart")
+        fig = go.Figure(
+            go.Bar(
+                x=sec["Section"],
+                y=sec["Percent"],
+                text=[f"{p:.0f}%" for p in sec["Percent"]],
+                textposition="outside",
+                marker_color=["#1E8449" if p >= 80 else ("#D9A441" if p >= 50 else "#C0392B") for p in sec["Percent"]],
+            )
+        )
+        fig.add_hline(y=80, line_dash="dash", line_color="#0B3C5D", annotation_text="Pass 80%")
+        fig.update_layout(
+            height=330,
+            margin=dict(l=10, r=10, t=20, b=10),
+            yaxis=dict(range=[0, 110], title="% correct"),
+            xaxis=dict(tickangle=-25),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ---- download ----
+    st.markdown("---")
+    st.markdown("### 📥 Download your results")
+    st.caption("Download your results below and submit them to your examiner or administrator.")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    username = (st.session_state.user or {}).get("username", "candidate")
+
+    export = {
+        "candidate": st.session_state.user,
+        "submitted_at": datetime.now().isoformat(timespec="seconds"),
+        "score": score,
+        "total": total,
+        "percent": round(pct, 2),
+        "passed": passed,
+        "duration_seconds": duration_secs,
+        "attempt": st.session_state.exam_attempts,
+        "results": results,
+    }
+
+    txt_lines = [
+        "DEVELOPER STANDARDS — FINAL EXAM SUBMISSION",
+        "=" * 52,
+        f"Candidate : {(st.session_state.user or {}).get('name','')}",
+        f"Username  : {username}",
+        f"Email     : {(st.session_state.user or {}).get('email','')}",
+        f"Submitted : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Time taken: {duration_txt}",
+        f"Score     : {score}/{total} ({pct:.1f}%) — {'PASS' if passed else 'FAIL'}",
+        "",
+        "QUESTION-BY-QUESTION",
+        "-" * 52,
+    ]
+    for r in results:
+        txt_lines += [
+            f"{r['n']}. [{r['section']}] {r['question']}",
+            f"   Given  : {r['given'] or '— not answered —'}",
+            f"   Correct: {r['answer']}",
+            f"   Result : {'CORRECT' if r['correct'] else 'INCORRECT'}",
+            "",
+        ]
+    txt_body = "\n".join(txt_lines)
+
+    csv_df = pd.DataFrame([
+        {
+            "No": r["n"],
+            "Section": r["section"],
+            "Question": r["question"],
+            "Given": r["given"] or "",
+            "Correct answer": r["answer"],
+            "Result": "Correct" if r["correct"] else "Incorrect",
+        }
+        for r in results
+    ])
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.download_button(
+            "📥 Download TXT",
+            data=txt_body,
+            file_name=f"exam_{username}_{ts}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with d2:
+        st.download_button(
+            "📥 Download CSV",
+            data=csv_df.to_csv(index=False),
+            file_name=f"exam_{username}_{ts}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with d3:
+        st.download_button(
+            "📥 Download JSON",
+            data=json.dumps(export, indent=2, default=str),
+            file_name=f"exam_{username}_{ts}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+    # ---- full review ----
+    st.markdown("---")
+    with st.expander("🔍 Full question-by-question review", expanded=False):
+        for r in results:
+            if r["correct"]:
+                st.success(f"✅ **Q{r['n']} · {r['section']}** — {r['question']}\n\nYour answer: **{r['given']}**")
+            else:
+                st.error(
+                    f"❌ **Q{r['n']} · {r['section']}** — {r['question']}\n\n"
+                    f"Your answer: **{r['given'] or '— not answered —'}**  \n"
+                    f"Correct answer: **{r['answer']}**  \n\n_{r['explanation']}_"
+                )
+
+    st.markdown("---")
+    if st.button("🔄 Retake exam", use_container_width=True):
+        _reset_exam()
+        st.rerun()
+
+
+# ==============================================================================
+# EXAMINER / ADMIN — VIEW SUBMISSIONS
+# ==============================================================================
+def s_submissions():
+    header("Exam Submissions", "Recorded exam attempts (admin / examiner view)", "ADMIN")
+
+    role = (st.session_state.user or {}).get("role")
+    if role not in ADMIN_ROLES:
+        st.error("🚫 Access denied. This section is only available to administrators.")
+        return
+
+    data = load_submissions()
+    if not data:
+        st.info("No submissions have been recorded on this server yet.")
+        return
+
+    rows = []
+    for d in data:
+        u = d.get("user") or {}
+        rows.append({
+            "Submitted": d.get("submitted_at", ""),
+            "Name": u.get("name", ""),
+            "Username": u.get("username", ""),
+            "Email": u.get("email", ""),
+            "Score": f"{d.get('score')}/{d.get('total')}",
+            "Percent": d.get("percent"),
+            "Attempt": d.get("attempt"),
+        })
+    df = pd.DataFrame(rows)
+
+    # ---- summary stats ----
+    total_subs = len(df)
+    unique_users = df["Username"].nunique() if "Username" in df else 0
+    pass_count = int((df["Percent"] >= EXAM_CONFIG["pass_mark"] * 100).sum()) if "Percent" in df else 0
+    avg_pct = float(df["Percent"].mean()) if "Percent" in df else 0.0
+
+    kpi_row([
+        ("Submissions", str(total_subs)),
+        ("Unique candidates", str(unique_users)),
+        ("Passed", f"{pass_count}/{total_subs}"),
+        ("Average %", f"{avg_pct:.1f}%"),
+    ])
+
+    st.markdown("---")
+    st.markdown("### All submissions")
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+    st.download_button(
+        "📥 Download all submissions (CSV)",
+        data=df.to_csv(index=False),
+        file_name=f"exam_submissions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+    )
+
+    # ---- individual candidate drill-down ----
+    st.markdown("---")
+    st.markdown("### Candidate detail")
+    candidates = sorted(df["Username"].unique().tolist())
+    if candidates:
+        pick = st.selectbox("Select a candidate", ["— select —"] + candidates, key="sub_pick")
+        if pick and pick != "— select —":
+            sub = next((d for d in reversed(data) if (d.get("user") or {}).get("username") == pick), None)
+            if sub:
+                u = sub.get("user") or {}
+                st.markdown(
+                    f"**{u.get('name','')}** · {u.get('email','')}  \n"
+                    f"Submitted: `{sub.get('submitted_at','')}`  \n"
+                    f"Score: **{sub.get('score')}/{sub.get('total')}** ({sub.get('percent')}%)  \n"
+                    f"Attempt: {sub.get('attempt')}"
+                )
+                ans_rows = []
+                for a in sub.get("answers", []):
+                    ans_rows.append({
+                        "Question ID": a.get("id"),
+                        "Given": a.get("given") or "—",
+                        "Correct?": "✅" if a.get("correct") else "❌",
+                    })
+                st.dataframe(pd.DataFrame(ans_rows), hide_index=True, use_container_width=True)
+
+    # ---- clear all ----
+    st.markdown("---")
+    with st.expander("⚠️ Danger zone"):
+        st.caption("Deleting submissions is permanent and affects every administrator.")
+        confirm = st.checkbox("I understand this will permanently delete all recorded submissions.", key="wipe_confirm")
+        if st.button("🗑 Delete ALL submissions", disabled=not confirm, type="secondary"):
+            try:
+                if os.path.exists(SUBMISSIONS_PATH):
+                    os.remove(SUBMISSIONS_PATH)
+                st.success("All submissions deleted.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not delete submissions: {exc}")
+
+
+# ==============================================================================
+# SUPER ADMIN — MANAGE ADMIN ACCOUNTS
+# ==============================================================================
+def s_admin_management():
+    header(
+        "Admin Management",
+        "Create and review administrator accounts (super-admin only)",
+        "SUPER ADMIN",
+    )
+
+    if (st.session_state.user or {}).get("role") != "super_admin":
+        st.error("🚫 Access denied. Only the super administrator may manage admin accounts.")
+        return
+
+    st.info(
+        "Only the **super administrator** can create administrator accounts. "
+        "Regular users who register through the login screen are always assigned the "
+        "**developer** role — they can never create or log in as an administrator."
+    )
+
+    # ---- list existing admins ----
+    st.markdown("### Existing administrator accounts")
+    users = load_users()
+    admin_rows = []
+    for uname, u in users.items():
+        role = (u.get("role") or "").lower()
+        if role in ADMIN_ROLES:
+            admin_rows.append({
+                "Username": uname,
+                "Name": u.get("name", ""),
+                "Email": u.get("email", ""),
+                "Role": role,
+            })
+    if admin_rows:
+        st.dataframe(pd.DataFrame(admin_rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("No administrator accounts found.")
+
+    st.markdown("---")
+
+    # ---- create a new admin account ----
+    st.markdown("### Create a new administrator account")
+    with st.form("create_admin_form", clear_on_submit=True):
+        a_name = st.text_input("Full name")
+        a_email = st.text_input("Email address")
+        a_user = st.text_input("Username", placeholder="e.g. examiner01")
+        a_pass = st.text_input("Password", type="password")
+        a_role = st.selectbox("Role", ["examiner", "admin"])
+        submitted = st.form_submit_button("Create admin account", type="primary", use_container_width=True)
+
+    if submitted:
+        errs = []
+        if not a_name.strip():
+            errs.append("Full name is required.")
+        if not valid_email(a_email):
+            errs.append("A valid email address is required.")
+        if len(a_user.strip()) < 3:
+            errs.append("Username must be at least 3 characters.")
+        if len(a_pass) < 6:
+            errs.append("Password must be at least 6 characters.")
+        if a_user.strip().lower() in load_users():
+            errs.append("That username already exists.")
+        if a_role not in ("examiner", "admin"):
+            errs.append("Role must be 'examiner' or 'admin'.")
+
+        if errs:
+            for e in errs:
+                st.error(f"❌ {e}")
+        else:
+            st.session_state.registered_users[a_user.strip().lower()] = {
+                "password": a_pass,
+                "name": a_name.strip(),
+                "email": a_email.strip(),
+                "role": a_role,
+            }
+            st.success(
+                f"✅ Admin account created: **{a_user.strip().lower()}** with role **{a_role}**. "
+                "It is active immediately — the user can now sign in with the credentials you set."
+            )
+            st.rerun()
+
+    st.markdown("---")
+    st.caption(
+        "ℹ️ Accounts created here live in this Streamlit session only. "
+        "To persist them across restarts, add them under `[users.<username>]` in `.streamlit/secrets.toml`."
+    )
+
+
+# ==============================================================================
 # SLIDE 1 — TITLE
 # ==============================================================================
 def s_title():
+    u = st.session_state.user or {}
     st.markdown(
-        """
+        f"""
         <div class="hero">
             <div class="hero-kicker">Interactive Technical Standards</div>
             <div class="hero-title">Developer Standards &amp; Development Workflow</div>
-            <div class="hero-sub">Not a slideshow — an interactive experience. Play through simulators, quizzes, and checklists.</div>
+            <div class="hero-sub">Welcome, <b>{html_lib.escape(u.get('name',''))}</b> — play through the simulators, then sit the graded final exam.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -317,9 +1654,9 @@ def s_title():
     kpi_row(
         [
             ("Status", "MANDATORY"),
-            ("Slides", "15"),
-            ("Interactive Activities", "12+"),
-            ("Progress Tracked", "Live"),
+            ("Slides", "16"),
+            ("Exam Questions", str(len(EXAM_QUESTIONS))),
+            ("Pass Mark", f"{int(EXAM_CONFIG['pass_mark']*100)}%"),
         ]
     )
     st.markdown("---")
@@ -332,9 +1669,11 @@ def s_title():
             "card-gold",
         )
         card(
-            "Real PR review",
-            "The Code Review slide uses <b>your actual PawningAuctioneer service</b> as the compliant "
-            "reference, paired with a broken version — you spot every standard violation.",
+            "Graded final exam",
+            f"<b>{len(EXAM_QUESTIONS)} exam questions</b>, {EXAM_CONFIG['duration_minutes']} minutes, "
+            "shuffled questions and options, auto-submit on timeout, and a per-section performance breakdown. "
+            "Your results are <b>recorded locally and can be downloaded</b>.",
+            "card-navy",
         )
         st.success("👉 Use the sidebar to jump around, or click **Next** to walk through in order.")
     with c2:
@@ -352,7 +1691,8 @@ def s_title():
                     "Failure Triage",
                     "Order the Workflow",
                     "Scenario Simulator",
-                    "Final Checklist",
+                    "Final Compliance Checklist",
+                    "Graded Final Exam",
                     "Progress Dashboard",
                 ],
                 "chip chip-navy",
@@ -575,7 +1915,6 @@ def s_branch_sim():
         "SECTION 3",
     )
 
-    # ---- 1. Convention reference ----
     st.markdown("#### Branch naming convention")
     st.dataframe(
         pd.DataFrame(
@@ -588,10 +1927,8 @@ def s_branch_sim():
         hide_index=True,
         use_container_width=True,
     )
-
     st.markdown("---")
 
-    # ---- 2. Scenario ----
     st.markdown("### 🎮 Scenario")
     st.info(
         "You've just been assigned **issue #4471** — a new loan report. "
@@ -599,48 +1936,28 @@ def s_branch_sim():
         "Decide how you'd branch, name it, and open the PR."
     )
 
-    # ---- 3. Branch landscape ----
     st.markdown("#### 🗺️ Available branches")
     c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(
-            '<div class="card card-navy" style="text-align:center;padding:12px;">'
-            '<div style="font-weight:800;color:#0B3C5D;font-size:.9rem;">origin/main</div>'
-            '<div style="font-size:.75rem;color:#5A7184;">Production, protected</div>'
-            "</div>",
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            '<div class="card card-gold" style="text-align:center;padding:12px;">'
-            '<div style="font-weight:800;color:#8A6512;font-size:.9rem;">origin/dev</div>'
-            '<div style="font-size:.75rem;color:#5A7184;">Integration (latest)</div>'
-            "</div>",
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            '<div class="card card-navy" style="text-align:center;padding:12px;">'
-            '<div style="font-weight:800;color:#0B3C5D;font-size:.9rem;">origin/qa</div>'
-            '<div style="font-size:.75rem;color:#5A7184;">QA testing</div>'
-            "</div>",
-            unsafe_allow_html=True,
-        )
-    with c4:
-        st.markdown(
-            '<div class="card card-red" style="text-align:center;padding:12px;">'
-            '<div style="font-weight:800;color:#9B2C2C;font-size:.9rem;">feature/4001</div>'
-            '<div style="font-size:.75rem;color:#5A7184;">Stale local (3 wks)</div>'
-            "</div>",
-            unsafe_allow_html=True,
-        )
+    branch_cards = [
+        (c1, "origin/main", "Production, protected", "card-navy", "#0B3C5D"),
+        (c2, "origin/dev", "Integration (latest)", "card-gold", "#8A6512"),
+        (c3, "origin/qa", "QA testing", "card-navy", "#0B3C5D"),
+        (c4, "feature/4001", "Stale local (3 wks)", "card-red", "#9B2C2C"),
+    ]
+    for col, name, sub, cls, colour in branch_cards:
+        with col:
+            st.markdown(
+                f'<div class="card {cls}" style="text-align:center;padding:12px;">'
+                f'<div style="font-weight:800;color:{colour};font-size:.9rem;">{name}</div>'
+                f'<div style="font-size:.75rem;color:#5A7184;">{sub}</div>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
 
     st.markdown("---")
     st.markdown("### 🧩 Make your three decisions")
 
-    # ---- 4. Inputs with live feedback ----
     c1, c2, c3 = st.columns(3)
-
     with c1:
         branch_name = st.text_input(
             "1️⃣ Branch name",
@@ -650,17 +1967,9 @@ def s_branch_sim():
         )
         if branch_name.strip():
             if branch_name.strip() == "feature/4471":
-                st.markdown(
-                    '<div style="color:#1E8449;font-weight:700;font-size:.82rem;margin-top:4px;">'
-                    "✅ Correct naming convention</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown('<div style="color:#1E8449;font-weight:700;font-size:.82rem;">✅ Correct naming convention</div>', unsafe_allow_html=True)
             else:
-                st.markdown(
-                    '<div style="color:#C0392B;font-weight:700;font-size:.82rem;margin-top:4px;">'
-                    "❌ Does not follow the convention</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown('<div style="color:#C0392B;font-weight:700;font-size:.82rem;">❌ Does not follow the convention</div>', unsafe_allow_html=True)
 
     with c2:
         base = st.selectbox(
@@ -668,21 +1977,12 @@ def s_branch_sim():
             ["— select —", "main", "dev", "qa", "feature/4001 (stale)"],
             index=0,
             key="bs_base_input",
-            help="Where should the new branch be created from?",
         )
         if base != "— select —":
             if base == "dev":
-                st.markdown(
-                    '<div style="color:#1E8449;font-weight:700;font-size:.82rem;margin-top:4px;">'
-                    "✅ Latest approved base</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown('<div style="color:#1E8449;font-weight:700;font-size:.82rem;">✅ Latest approved base</div>', unsafe_allow_html=True)
             else:
-                st.markdown(
-                    '<div style="color:#C0392B;font-weight:700;font-size:.82rem;margin-top:4px;">'
-                    "❌ Not the correct base</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown('<div style="color:#C0392B;font-weight:700;font-size:.82rem;">❌ Not the correct base</div>', unsafe_allow_html=True)
 
     with c3:
         target = st.selectbox(
@@ -690,35 +1990,21 @@ def s_branch_sim():
             ["— select —", "main", "dev", "qa"],
             index=0,
             key="bs_target_input",
-            help="Which branch should the initial PR be opened against?",
         )
         if target != "— select —":
             if target == "dev":
-                st.markdown(
-                    '<div style="color:#1E8449;font-weight:700;font-size:.82rem;margin-top:4px;">'
-                    "✅ Correct PR target</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown('<div style="color:#1E8449;font-weight:700;font-size:.82rem;">✅ Correct PR target</div>', unsafe_allow_html=True)
             else:
-                st.markdown(
-                    '<div style="color:#C0392B;font-weight:700;font-size:.82rem;margin-top:4px;">'
-                    "❌ Wrong PR target</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown('<div style="color:#C0392B;font-weight:700;font-size:.82rem;">❌ Wrong PR target</div>', unsafe_allow_html=True)
 
-    # ---- 5. Live preview ----
     if branch_name.strip() and base != "— select —" and target != "— select —":
         st.markdown("---")
         st.markdown("#### 🔎 Your chosen flow")
         st.markdown(
-            vflow(
-                [base, branch_name.strip(), f"PR → {target}"],
-                ["fbox-navy", "fbox-teal", "fbox-gold"],
-            ),
+            vflow([base, branch_name.strip(), f"PR → {target}"], ["fbox-navy", "fbox-teal", "fbox-gold"]),
             unsafe_allow_html=True,
         )
 
-    # ---- 6. Grade / Reveal buttons ----
     st.markdown("---")
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -729,68 +2015,38 @@ def s_branch_sim():
     if grade:
         score = 0
         feedback = []
-
         if branch_name.strip() == "feature/4471":
             score += 1
-            feedback.append((
-                "success",
-                "✅ **Branch name** — `feature/4471` follows the `feature/<issue-id>` convention.",
-            ))
+            feedback.append(("success", "✅ **Branch name** — `feature/4471` follows the `feature/<issue-id>` convention."))
         else:
-            feedback.append((
-                "error",
-                f"❌ **Branch name** — expected `feature/4471`, got `{branch_name.strip() or '—'}`.",
-            ))
+            feedback.append(("error", f"❌ **Branch name** — expected `feature/4471`, got `{branch_name.strip() or '—'}`."))
 
         if base == "dev":
             score += 2
-            feedback.append((
-                "success",
-                "✅ **Base branch** — `dev` is the latest approved integration branch for feature work.",
-            ))
+            feedback.append(("success", "✅ **Base branch** — `dev` is the latest approved integration branch for feature work."))
         elif base == "main":
-            feedback.append((
-                "error",
-                "❌ **Base branch** — `main` is production. Features must branch from the latest `dev`.",
-            ))
+            feedback.append(("error", "❌ **Base branch** — `main` is production. Features must branch from the latest `dev`."))
         elif base == "qa":
-            feedback.append((
-                "error",
-                "❌ **Base branch** — `qa` is a promotion target, not a source for feature branches.",
-            ))
+            feedback.append(("error", "❌ **Base branch** — `qa` is a promotion target, not a source for feature branches."))
         elif base == "feature/4001 (stale)":
-            feedback.append((
-                "error",
-                "❌ **Base branch** — never branch from a stale local branch. Run `git pull origin dev` first.",
-            ))
+            feedback.append(("error", "❌ **Base branch** — never branch from a stale local branch. Run `git pull origin dev` first."))
         else:
             feedback.append(("warning", "⚠️ **Base branch** — pick one."))
 
         if target == "dev":
             score += 2
-            feedback.append((
-                "success",
-                "✅ **PR target** — the initial PR must go to `dev`. Direct PRs to QA are prohibited.",
-            ))
+            feedback.append(("success", "✅ **PR target** — the initial PR must go to `dev`. Direct PRs to QA are prohibited."))
         elif target == "qa":
-            feedback.append((
-                "error",
-                "❌ **PR target** — direct feature → QA merges are not permitted under the standard workflow.",
-            ))
+            feedback.append(("error", "❌ **PR target** — direct feature → QA merges are not permitted under the standard workflow."))
         elif target == "main":
-            feedback.append((
-                "error",
-                "❌ **PR target** — `main` is not the initial PR target for features.",
-            ))
+            feedback.append(("error", "❌ **PR target** — `main` is not the initial PR target for features."))
         else:
             feedback.append(("warning", "⚠️ **PR target** — pick one."))
 
         record_score("branch_sim", score, 5)
-
         st.markdown(f"**Score:** {score_pill(score, 5)}", unsafe_allow_html=True)
         for kind, msg in feedback:
             getattr(st, kind)(msg)
-
         if score == 5:
             st.success("🏆 Perfect — you've mastered the branch workflow.")
             st.balloons()
@@ -798,23 +2054,12 @@ def s_branch_sim():
     if reveal:
         st.markdown("---")
         st.markdown("### 🔑 Correct answers")
-        kpi_row(
-            [
-                ("Branch name", "feature/4471"),
-                ("Base branch", "dev"),
-                ("Initial PR target", "dev"),
-            ]
-        )
-
+        kpi_row([("Branch name", "feature/4471"), ("Base branch", "dev"), ("Initial PR target", "dev")])
         st.markdown("#### ✅ Correct flow")
         st.markdown(
-            vflow(
-                ["dev (pull latest)", "feature/4471", "PR → dev"],
-                ["fbox-navy", "fbox-teal", "fbox-gold"],
-            ),
+            vflow(["dev (pull latest)", "feature/4471", "PR → dev"], ["fbox-navy", "fbox-teal", "fbox-gold"]),
             unsafe_allow_html=True,
         )
-
         st.markdown("#### 📜 Exact Git commands")
         st.code(
             """# 1. Update dev and branch from it
@@ -843,118 +2088,23 @@ git push -u origin feature/4471
             language="bash",
         )
 
-    # ---- 7. Two-stage promotion diagram (always visible) ----
     st.markdown("---")
     st.markdown("### 🚀 Two-stage promotion: feature → dev → qa")
     st.caption("The feature PR stops at `dev`. A separate promotion PR later moves `dev` → `qa`.")
-
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Stage 1 — Feature merge**")
-        st.markdown(
-            hflow(["feature/4471", "dev"], gold_idx=(1,)),
-            unsafe_allow_html=True,
-        )
+        st.markdown(hflow(["feature/4471", "dev"], gold_idx=(1,)), unsafe_allow_html=True)
         st.caption("Squash-merge after reviews and CI pass.")
-
     with c2:
         st.markdown("**Stage 2 — Release promotion**")
-        st.markdown(
-            hflow(["dev", "qa"], gold_idx=(1,)),
-            unsafe_allow_html=True,
-        )
+        st.markdown(hflow(["dev", "qa"], gold_idx=(1,)), unsafe_allow_html=True)
         st.caption("A separate batch PR promotes `dev` → `qa` when a release is ready.")
-
-    st.error(
-        "**Never merge `feature/4471` directly into `qa`.** "
-        "Only `dev` → `qa` promotions are permitted."
-    )
-    header(
-        "Git Branch Flow Simulator",
-        "Choose the right base branch and PR target — get graded instantly",
-        "SECTION 3",
-    )
-    st.markdown("#### Branch naming convention")
-    st.dataframe(
-        pd.DataFrame(
-            [
-                ["Feature", "feature/<issue-id>", "feature/1234"],
-                ["Bug fix", "bugfix/<issue-id>", "bugfix/1234"],
-            ],
-            columns=["Branch Type", "Naming Convention", "Example"],
-        ),
-        hide_index=True,
-        use_container_width=True,
-    )
-    st.markdown("---")
-    st.markdown("### 🎮 Scenario")
-    st.info(
-        "You've just been assigned **issue #4471** — a new loan report. "
-        "You have local access to branches `main`, `dev`, `qa`, and a stale local `feature/4001` "
-        "that hasn't been synced in 3 weeks. Your team uses the standard promotion flow."
-    )
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        branch_name = st.text_input("1. What will you name your working branch?", value="", key="bs_name")
-    with c2:
-        base = st.selectbox(
-            "2. Create the working branch from…",
-            ["main", "dev", "qa", "feature/4001 (local, stale)"],
-            index=None,
-            key="bs_base",
-        )
-    with c3:
-        target = st.selectbox(
-            "3. What is the initial PR target?",
-            ["main", "dev", "qa"],
-            index=None,
-            key="bs_target",
-        )
-    if st.button("✅ Grade my choices", type="primary"):
-        score = 0
-        feedback = []
-        if branch_name.strip() == "feature/4471":
-            score += 1
-            feedback.append(("success", "Branch name is correct: `feature/4471` follows the convention."))
-        else:
-            feedback.append(("error", "Branch name should be `feature/4471` — `feature/<issue-id>`."))
-        if base == "dev":
-            score += 2
-            feedback.append(("success", "Correct base: `dev` is the latest approved base for feature work."))
-        elif base == "main":
-            feedback.append(("error", "`main` is not the base for features — use the latest `dev`."))
-        elif base == "qa":
-            feedback.append(("error", "`qa` is a promotion target, not a feature base."))
-        elif base and "stale" in base:
-            feedback.append(("error", "Never branch from a stale local branch — always pull the latest."))
-        else:
-            feedback.append(("warning", "Pick a base branch."))
-        if target == "dev":
-            score += 2
-            feedback.append(("success", "Correct PR target: `dev`. Direct PRs to QA are not permitted."))
-        else:
-            feedback.append(("error", f"Wrong target. The initial PR must go to `dev`, not `{target}`."))
-        record_score("branch_sim", score, 5)
-        for kind, msg in feedback:
-            getattr(st, kind)(msg)
-        st.markdown(f"**Score:** {score_pill(score, 5)}", unsafe_allow_html=True)
-        if score == 5:
-            st.success("🏆 Perfect — you've nailed the branch workflow.")
-            st.balloons()
-    st.markdown("---")
-    st.markdown(
-        f'<div class="hflow" style="justify-content:center;">'
-        + '<span class="hbox">Working Branch</span><span class="harrow">→</span>'
-        + '<span class="hbox hbox-navy">DEV</span><span class="harrow">→</span>'
-        + '<span class="hbox hbox-gold">QA</span>'
-        + "</div>",
-        unsafe_allow_html=True,
-    )
-    st.error("**Direct merges from feature/bugfix branches into QA are not permitted under the standard workflow.**")
+    st.error("**Never merge `feature/4471` directly into `qa`.** Only `dev` → `qa` promotions are permitted.")
 
 
 # ==============================================================================
-# SLIDE 6 — PR REVIEW SIMULATOR (short one)
+# SLIDE 6 — PR REVIEW SIMULATOR
 # ==============================================================================
 def s_pr_sim():
     header(
@@ -1265,7 +2415,7 @@ GROUP BY branch_id;"""
 
 
 # ==============================================================================
-# SLIDE 9 — REAL PR REVIEW  (NEW — replaces "Spot the Issue")
+# SLIDE 9 — REAL PR REVIEW
 # ==============================================================================
 def s_review_game():
     header(
@@ -1402,7 +2552,6 @@ export default class PawningAuctioneerReadPlatformService {
     }
 
     mapRow(row: PawningAuctioneerRow) {
-      // ... type-safe mapping via withOptionalCheckBigInt / withOptionalCheckDecimal
       return new PawnAuctioneerData({ /* fully typed */ } as any)
     }
   }
@@ -1414,7 +2563,6 @@ export default class PawningAuctioneerReadPlatformService {
     const Mapper = new PawningAuctioneerReadPlatformService.PawningAuctioneer()
     const searchFilter = `%${search ?? ''}%`
 
-    // ✅ Parameterised COUNT query
     const countQuery = `
       SELECT COUNT(*) AS count FROM pw_auctioneers a
       WHERE (a.name LIKE ? OR a.nic LIKE ? OR a.company_name LIKE ? OR a.license_number LIKE ?)
@@ -1424,7 +2572,6 @@ export default class PawningAuctioneerReadPlatformService {
     ])) as { count: number }[]
     const total = Number(countResult[0]?.count ?? 0)
 
-    // ✅ Parameterised SELECT with explicit columns + bounded results
     let sql = `
       SELECT ${Mapper.schema}
       WHERE (a.name LIKE ? OR a.nic LIKE ? OR a.company_name LIKE ? OR a.license_number LIKE ?)
@@ -1445,7 +2592,6 @@ export default class PawningAuctioneerReadPlatformService {
       const result = (await this.context.queryRunner.query(query, [auctioneerId])) as PawningAuctioneerRow[]
       return Mapper.mapRow(result[0])
     } catch (error) {
-      // ✅ Domain-specific exception
       throw new PawnAuctioneerNotFoundException(auctioneerId)
     }
   }
@@ -1913,6 +3059,7 @@ def s_dashboard():
         ("workflow_order", "Order the Workflow"),
         ("scenarios", "Scenario Simulator"),
         ("final_checklist", "Final Compliance Checklist"),
+        ("exam", "🎓 Final Exam"),
     ]
     rows = []
     for key, label in activities:
@@ -1928,6 +3075,7 @@ def s_dashboard():
         else:
             rows.append({"Activity": label, "Score": "—", "Percent": 0.0, "Status": "⏳ Not started"})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
     earned, possible = total_score()
     pct = earned / possible * 100 if possible else 0
     kpi_row(
@@ -1947,6 +3095,21 @@ def s_dashboard():
         st.warning("📚 Keep going — revisit the slides that have unfinished or low-scoring activities.")
     else:
         st.info("👋 Start with the sidebar or click **Next** — every activity contributes to this dashboard.")
+
+    st.markdown("---")
+    st.markdown("#### Exam status")
+    if st.session_state.exam_submitted:
+        total_q = len(st.session_state.exam_results)
+        ex = st.session_state.exam_score
+        ex_pct = ex / total_q * 100 if total_q else 0
+        st.markdown(
+            f'<div class="kpi"><div class="v">{ex} / {total_q}</div>'
+            f'<div class="l">Final Exam — {"PASSED" if ex_pct >= EXAM_CONFIG["pass_mark"]*100 else "NOT PASSED"} ({ex_pct:.0f}%)</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("You have not taken the final exam yet. Open the **Final Exam** slide in the sidebar when you are ready.")
+
     st.markdown("---")
     st.markdown("#### Overall progress")
     st.progress(min(pct / 100, 1.0))
@@ -1959,6 +3122,7 @@ def s_dashboard():
         st.session_state.pr_selected = set()
         st.session_state.review_selected = set()
         st.session_state.celebrated = {"dev": False, "final": False}
+        _reset_exam()
         st.rerun()
 
 
@@ -2003,12 +3167,23 @@ def s_final():
     pct = earned / possible * 100 if possible else 0
     kpi_row(
         [
-            ("Slides", "15"),
-            ("Interactive Activities", "12+"),
+            ("Slides", "16"),
+            ("Exam Questions", str(len(EXAM_QUESTIONS))),
             ("Your Score", f"{earned} / {possible}"),
             ("Completion", f"{pct:.0f}%"),
         ]
     )
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🎓 Go to the Final Exam", type="primary", use_container_width=True):
+            st.session_state.slide = next(i for i, (t, _) in enumerate(SLIDES) if t.startswith("13."))
+            st.rerun()
+    with c2:
+        if st.button("📊 View my dashboard", use_container_width=True):
+            st.session_state.slide = next(i for i, (t, _) in enumerate(SLIDES) if "Dashboard" in t)
+            st.rerun()
+
     st.markdown(
         '<div style="text-align:center;margin-top:28px;color:#5A7184;font-size:.85rem;">'
         "Developer Standards &amp; Development Workflow · Mandatory for all team members"
@@ -2018,7 +3193,15 @@ def s_final():
 
 
 # ==============================================================================
-# SLIDE REGISTRY
+# AUTH GATE
+# ==============================================================================
+if not st.session_state.authenticated:
+    login_page()
+    st.stop()
+
+
+# ==============================================================================
+# SLIDE REGISTRY  (built after login, so the role is known)
 # ==============================================================================
 SLIDES = [
     ("Title", s_title),
@@ -2034,23 +3217,49 @@ SLIDES = [
     ("10. Order the Workflow", s_workflow_game),
     ("11. Scenario Simulator", s_scenarios),
     ("12. Final Compliance Checklist", s_final_checklist),
-    ("13. Progress Dashboard", s_dashboard),
-    ("14. Final Message", s_final),
+    ("13. 🎓 Final Exam", s_exam),
+    ("14. Progress Dashboard", s_dashboard),
+    ("15. Final Message", s_final),
 ]
 
-# ------------------------------------------------------------------------------
+_user_role = (st.session_state.user or {}).get("role")
+
+if _user_role in ADMIN_ROLES:
+    SLIDES.append(("16. Exam Submissions (Admin)", s_submissions))
+
+if _user_role == "super_admin":
+    SLIDES.append(("17. Admin Management (Super Admin)", s_admin_management))
+
+# guard: clamp slide index after login/logout
+if st.session_state.slide >= len(SLIDES):
+    st.session_state.slide = 0
+
+
+# ==============================================================================
 # SIDEBAR
-# ------------------------------------------------------------------------------
+# ==============================================================================
 with st.sidebar:
+    u = st.session_state.user or {}
     st.markdown(
-        """
-        <div style="padding:6px 2px 14px 2px;">
-            <div style="font-size:1.12rem;font-weight:900;letter-spacing:.5px;">🛠️ DEV STANDARDS</div>
-            <div style="font-size:.7rem;opacity:.75;letter-spacing:1.5px;">INTERACTIVE EDITION</div>
+        f"""
+        <div class="user-badge">
+            <div style="font-size:.7rem;letter-spacing:1.2px;opacity:.8;">SIGNED IN</div>
+            <div style="font-size:.95rem;font-weight:800;margin-top:2px;">{html_lib.escape(u.get('name',''))}</div>
+            <div style="font-size:.7rem;opacity:.85;">{html_lib.escape(u.get('username',''))} · {html_lib.escape((u.get('role') or '').upper())}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    st.markdown(
+        """
+        <div style="padding:0 2px 10px 2px;">
+            <div style="font-size:1.05rem;font-weight:900;letter-spacing:.5px;">🛠️ DEV STANDARDS</div>
+            <div style="font-size:.68rem;opacity:.75;letter-spacing:1.5px;">EXAM EDITION</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     progress = (st.session_state.slide + 1) / len(SLIDES)
     st.progress(progress)
     st.caption(f"Slide {st.session_state.slide + 1} of {len(SLIDES)}")
@@ -2066,12 +3275,38 @@ with st.sidebar:
             f'</div>',
             unsafe_allow_html=True,
         )
+
+    if st.session_state.exam_submitted:
+        ex_total = len(st.session_state.exam_results)
+        ex_pct = st.session_state.exam_score / ex_total * 100 if ex_total else 0
+        exam_state = "PASSED" if ex_pct >= EXAM_CONFIG["pass_mark"] * 100 else "NOT PASSED"
+        st.markdown(
+            f'<div style="background:rgba(255,255,255,.10);border-radius:8px;padding:7px 10px;margin-bottom:8px;'
+            f'font-size:.72rem;">Exam: <b>{st.session_state.exam_score}/{ex_total}</b> · {exam_state}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="background:rgba(217,164,65,.20);border-radius:8px;padding:7px 10px;margin-bottom:8px;'
+            'font-size:.72rem;">🎓 Final exam not taken yet</div>',
+            unsafe_allow_html=True,
+        )
+
     st.markdown("---")
     for i, (title, _) in enumerate(SLIDES):
         if st.button(title, key=f"nav_{i}"):
             st.session_state.slide = i
             st.rerun()
+
     st.markdown("---")
+    if st.button("🚪 Sign out", key="logout_btn"):
+        for k in list(_defaults.keys()):
+            st.session_state.pop(k, None)
+        for key in list(st.session_state.keys()):
+            if key.startswith(("exam_radio_", "pal_", "typeq_", "ab_", "sc_", "pr_", "rev_", "nav_", "dev_ck_", "final_ck_", "wf_btn_")):
+                st.session_state.pop(key, None)
+        st.rerun()
+
     if st.button("🔄 Reset everything", key="global_reset"):
         st.session_state.scores = {}
         st.session_state.dev_checklist = {}
@@ -2081,16 +3316,18 @@ with st.sidebar:
         st.session_state.review_selected = set()
         st.session_state.wf_clicked = []
         st.session_state.celebrated = {"dev": False, "final": False}
+        _reset_exam()
         st.rerun()
 
-# ------------------------------------------------------------------------------
+
+# ==============================================================================
 # RENDER ACTIVE SLIDE
-# ------------------------------------------------------------------------------
+# ==============================================================================
 SLIDES[st.session_state.slide][1]()
 
-# ------------------------------------------------------------------------------
+# ==============================================================================
 # BOTTOM NAVIGATION
-# ------------------------------------------------------------------------------
+# ==============================================================================
 st.markdown("---")
 c1, c2, c3 = st.columns([1, 3, 1])
 
