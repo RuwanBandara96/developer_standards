@@ -1,11 +1,15 @@
 # ==============================================================================
 #  DEVELOPER STANDARDS & DEVELOPMENT WORKFLOW — INTERACTIVE EXAM EDITION
-#  Login + Graded Exam + Local Submission Storage + Admin Console
+#  Login + Graded Exam (multi-set) + Submission Storage + Admin Console
 # ------------------------------------------------------------------------------
 #  Run with:   streamlit run developer.py
 #  Requires:   streamlit, pandas, numpy, plotly
 #
 #  Credentials are NOT stored in this file. They live in .streamlit/secrets.toml
+#  Question bank is stored in exam_bank.json (falls back to built-in defaults).
+#
+#  Sessions survive browser refresh via a signed token in the URL
+#  (?session=...). Set [session] secret in secrets.toml for production.
 # ==============================================================================
 
 import streamlit as st
@@ -17,8 +21,12 @@ import os
 import json
 import time
 import random
+import hmac
+import hashlib
+import base64
 import html as html_lib
 from datetime import datetime
+from posts import init_posts_state, s_posts_hub, s_posts_management
 
 # ------------------------------------------------------------------------------
 # PAGE CONFIG
@@ -77,9 +85,27 @@ hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
 
 .slide-title{font-size:1.85rem;font-weight:800;color:var(--navy);margin:0 0 2px 0;line-height:1.15;}
 .slide-sub{font-size:.94rem;color:var(--muted);margin:0 0 16px 0;}
+.page-header{
+  position: sticky;
+  top: 1000rem;                 /* pushed down — extra gap below the navbar */
+  z-index: 200;
+  background: #F7FAFC;
+  padding: 25px 0 14px 0;    /* top padding = the visible gap */
+  margin: 0 0 8px 0;
+  border-bottom: 2px solid var(--line);
+  backdrop-filter: blur(6px);
+}
 .sec-num{
-  display:inline-block;background:var(--teal);color:#fff;font-size:.7rem;font-weight:800;
-  padding:3px 10px;border-radius:20px;letter-spacing:1px;margin-bottom:8px;
+  display:inline-block;
+  background:var(--teal);
+  color:#fff;
+  font-size:.7rem;
+  font-weight:800;
+  padding:5px 14px;         /* horizontal pill — was 10px 10px (square) */
+  border-radius:20px;
+  letter-spacing:1.2px;
+  margin:0 0 10px 0;        /* a touch more space below the chip */
+  line-height:1;
 }
 
 .card{
@@ -164,14 +190,12 @@ hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
 .pill-fail{background:#FDECEC;color:#9B2C2C;border:1px solid #F5C6C6;}
 .pill-mid{background:#FDF4E3;color:#8A6512;border:1px solid #F0D9A8;}
 
-/* LOGIN */
 .login-card{
   background:#fff;border:1px solid var(--line);border-radius:16px;padding:26px 26px 10px 26px;
   box-shadow:0 12px 34px rgba(11,60,93,.12);
 }
 .login-note{font-size:.76rem;color:#5A7184;line-height:1.5;}
 
-/* EXAM */
 .exam-card{
   background:#fff;border:1px solid var(--line);border-left:6px solid var(--navy);
   border-radius:12px;padding:20px 24px;box-shadow:0 3px 10px rgba(11,60,93,.08);
@@ -193,6 +217,11 @@ hr{border:none;border-top:1px solid var(--line);margin:18px 0;}
 .user-badge{
   background:rgba(255,255,255,.12);border-radius:10px;padding:10px 12px;margin-bottom:10px;
   border:1px solid rgba(255,255,255,.18);
+}
+.set-badge{
+  display:inline-block;background:#E9EFF5;color:#0B3C5D;border:1px solid #C6D6E4;
+  border-radius:20px;padding:4px 12px;font-size:.72rem;font-weight:700;letter-spacing:.5px;
+  margin-left:6px;
 }
 
 section[data-testid="stSidebar"]{background:#0B3C5D;}
@@ -245,7 +274,11 @@ def vflow(items, styles=None):
 def header(title, sub="", num=""):
     n = f'<div class="sec-num">{num}</div>' if num else ""
     st.markdown(
-        f'{n}<div class="slide-title">{title}</div><div class="slide-sub">{sub}</div>',
+        f'<div class="page-header">'
+        f'{n}'
+        f'<div class="slide-title">{title}</div>'
+        f'<div class="slide-sub">{sub}</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
@@ -299,17 +332,19 @@ def valid_email(addr: str) -> bool:
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", (addr or "").strip()))
 
 
+def slugify(name: str) -> str:
+    """Turn a human name into a URL-safe id."""
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", (name or "").strip().lower()).strip("_")
+    return s or "exam"
+
+
 # ==============================================================================
 # AUTHENTICATION  (all credentials come from .streamlit/secrets.toml)
-# ------------------------------------------------------------------------------
-#  NO usernames or passwords are stored in this source file.
-#  Define every account under a [users.<username>] block in secrets.toml.
 # ==============================================================================
 ADMIN_ROLES = ("examiner", "admin", "super_admin")
 
 
 def _get_exam_access_code() -> str:
-    """Access code required for self-registration (from secrets, then env)."""
     try:
         code = st.secrets.get("exam", {}).get("access_code")
         if code:
@@ -320,7 +355,6 @@ def _get_exam_access_code() -> str:
 
 
 def _get_users_from_secrets() -> dict:
-    """Read the [users.*] tables from st.secrets. Returns {} if not configured."""
     users = {}
     try:
         secret_users = st.secrets.get("users", {})
@@ -332,7 +366,6 @@ def _get_users_from_secrets() -> dict:
 
 
 def users_configured() -> bool:
-    """True if at least one account is defined and at least one super_admin exists."""
     users = _get_users_from_secrets()
     if not users:
         return False
@@ -340,10 +373,99 @@ def users_configured() -> bool:
 
 
 def load_users() -> dict:
-    """Return the effective user directory: secrets + in-session registrations."""
     users = _get_users_from_secrets()
     users.update(st.session_state.get("registered_users", {}))
     return users
+
+
+# ------------------------------------------------------------------------------
+# SESSION PERSISTENCE — survive browser refresh via a signed URL token
+# ------------------------------------------------------------------------------
+def _login_secret() -> str:
+    """
+    Secret used to sign session tokens.
+    Order of precedence: st.secrets['session']['secret'] → env → dev fallback.
+    Set a real secret in production, or tokens can be forged.
+    """
+    try:
+        s = st.secrets.get("session", {}).get("secret")
+        if s:
+            return str(s)
+    except Exception:
+        pass
+    return os.getenv("SESSION_SECRET", "dev-only-change-me")
+
+
+def _make_token(username: str) -> str:
+    """Create a signed, URL-safe token for a username."""
+    secret = _login_secret().encode()
+    uname = (username or "").strip().lower()
+    sig = hmac.new(secret, uname.encode(), hashlib.sha256).hexdigest()
+    raw = f"{uname}:{sig}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _verify_token(token: str):
+    """Return the username if the token is valid, else None."""
+    if not token:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(token.encode()).decode()
+        uname, sig = raw.split(":", 1)
+    except Exception:
+        return None
+    secret = _login_secret().encode()
+    expected = hmac.new(secret, uname.encode(), hashlib.sha256).hexdigest()
+    if hmac.compare_digest(sig, expected):
+        return uname
+    return None
+
+
+def _clear_session_token():
+    """Remove the session token from the URL."""
+    try:
+        if "session" in st.query_params:
+            del st.query_params["session"]
+    except Exception:
+        pass
+
+
+def _restore_session_from_url() -> bool:
+    """
+    If a valid session token is present in the URL, restore the user.
+    Returns True if the user is authenticated after this call.
+    """
+    if st.session_state.get("authenticated"):
+        return True
+
+    try:
+        token = st.query_params.get("session")
+    except Exception:
+        token = None
+
+    if not token:
+        return False
+
+    uname = _verify_token(token)
+    if not uname:
+        _clear_session_token()
+        return False
+
+    users = load_users()
+    if uname not in users:
+        _clear_session_token()
+        return False
+
+    # Rebuild the session as if the user had just logged in
+    st.session_state.authenticated = True
+    st.session_state.user = {
+        "username": uname,
+        "name": users[uname].get("name", uname),
+        "email": users[uname].get("email", ""),
+        "role": (users[uname].get("role") or "developer").lower(),
+    }
+    st.session_state.login_time = datetime.now().isoformat(timespec="seconds")
+    return True
 
 
 def login_page():
@@ -358,39 +480,45 @@ def login_page():
         unsafe_allow_html=True,
     )
 
-    # --- Hard stop if no accounts are configured in secrets ---
     if not users_configured():
         st.error(
             "⚠️ **No accounts are configured.** Add a `.streamlit/secrets.toml` file "
-            "next to this script with at least one `super_admin` account. See the setup "
-            "instructions below."
+            "next to this script with at least one `super_admin` account. See the schema below."
         )
-        with st.expander("📄 Required `.streamlit/secrets.toml` structure", expanded=True):
+        with st.expander("📄 Required `.streamlit/secrets.toml` schema", expanded=True):
+            st.markdown(
+                "The file must define an `[exam]` section (for self-registration) and "
+                "at least one account under `[users.<username>]` with the role "
+                "`super_admin`. Replace every `<placeholder>` with your own values."
+            )
             st.code(
                 """# .streamlit/secrets.toml
 
 [exam]
-access_code = "CHANGE-ME-2026"      # required for self-registration
+access_code = "<your-access-code>"      # share only with real candidates
 
-[users.superadmin]
-password = "ChangeMe@2026"
-name     = "Super Administrator"
-email    = "superadmin@yourcompany.com"
-role     = "super_admin"           # super_admin | admin | examiner | developer | qa
+[session]
+secret = "<a-long-random-string>"       # signs session tokens for refresh-persistence
 
-[users.alice]
-password = "Alice@2026"
-name     = "Alice Smith"
-email    = "alice@yourcompany.com"
-role     = "developer"
+[users.<username>]
+password = "<strong-password>"
+name     = "<full-name>"
+email    = "<email-address>"
+role     = "super_admin"                # required — the app will not start without this
 
-[users.bob]
-password = "Bob@2026"
-name     = "Bob Jones"
-email    = "bob@yourcompany.com"
-role     = "examiner"              # can view exam submissions
-""",
+# Optional — add as many additional accounts as you need:
+# [users.<another-username>]
+# password = "<strong-password>"
+# name     = "<full-name>"
+# email    = "<email-address>"
+# role     = "<role>"                   # developer | qa | examiner | admin""",
                 language="toml",
+            )
+            st.markdown(
+                "**Available roles**  \n"
+                "`super_admin` — full access, creates other admins  \n"
+                "`admin` / `examiner` — view submissions, manage exams & questions  \n"
+                "`developer` / `qa` — take the exam only"
             )
             st.caption(
                 "Save the file, stop the Streamlit process (Ctrl + C), and start it again — "
@@ -424,6 +552,13 @@ role     = "examiner"              # can view exam submissions
                         "role": (users[u].get("role") or "developer").lower(),
                     }
                     st.session_state.login_time = datetime.now().isoformat(timespec="seconds")
+
+                    # Persist across browser refresh: store a signed token in the URL
+                    try:
+                        st.query_params["session"] = _make_token(u)
+                    except Exception:
+                        pass
+
                     st.success(f"Welcome, {st.session_state.user['name']}!")
                     time.sleep(0.4)
                     st.rerun()
@@ -463,7 +598,7 @@ role     = "examiner"              # can view exam submissions
                         "password": r_pass,
                         "name": r_name.strip(),
                         "email": r_email.strip(),
-                        "role": "developer",     # role is enforced — never user-controlled
+                        "role": "developer",
                     }
                     st.success("✅ Account created. Switch to the **Sign in** tab and log in.")
 
@@ -478,9 +613,16 @@ role     = "examiner"              # can view exam submissions
 
 
 # ==============================================================================
-# SUBMISSION STORAGE
+# DATA STORAGE  (Submissions + Exam Bank)
 # ==============================================================================
 SUBMISSIONS_PATH = "exam_submissions.json"
+EXAM_BANK_PATH = "exam_bank.json"
+LEGACY_QUESTIONS_PATH = "exam_questions.json"   # old single-set file (auto-migrated)
+
+DEFAULT_EXAM_ID = "default"
+DEFAULT_EXAM_NAME = "Developer Standards — Default Exam"
+DEFAULT_EXAM_DURATION = 30
+DEFAULT_EXAM_PASS_MARK = 0.80
 
 
 def save_submission(record: dict) -> bool:
@@ -507,6 +649,87 @@ def load_submissions():
         return []
 
 
+def _default_exam_dict():
+    """Wrap the built-in default questions into a single default exam set."""
+    return {
+        DEFAULT_EXAM_ID: {
+            "name": DEFAULT_EXAM_NAME,
+            "duration_minutes": DEFAULT_EXAM_DURATION,
+            "pass_mark": DEFAULT_EXAM_PASS_MARK,
+            "questions": globals().get("DEFAULT_EXAM_QUESTIONS", []),
+        }
+    }
+
+
+def load_exam_bank() -> dict:
+    """
+    Load the full exam bank. Order of precedence:
+      1. exam_bank.json (new format, dict of exams)
+      2. exam_questions.json (legacy flat list → auto-migrated)
+      3. Built-in defaults
+    """
+    # 1. New format
+    if os.path.exists(EXAM_BANK_PATH):
+        try:
+            with open(EXAM_BANK_PATH, "r", encoding="utf-8") as fh:
+                bank = json.load(fh)
+            if isinstance(bank, dict) and bank:
+                return bank
+        except Exception:
+            pass
+
+    # 2. Legacy flat list → migrate
+    if os.path.exists(LEGACY_QUESTIONS_PATH):
+        try:
+            with open(LEGACY_QUESTIONS_PATH, "r", encoding="utf-8") as fh:
+                legacy = json.load(fh)
+            if isinstance(legacy, list) and legacy:
+                migrated = {
+                    DEFAULT_EXAM_ID: {
+                        "name": DEFAULT_EXAM_NAME,
+                        "duration_minutes": DEFAULT_EXAM_DURATION,
+                        "pass_mark": DEFAULT_EXAM_PASS_MARK,
+                        "questions": legacy,
+                    }
+                }
+                # Persist the migrated bank so we only migrate once
+                try:
+                    with open(EXAM_BANK_PATH, "w", encoding="utf-8") as fh:
+                        json.dump(migrated, fh, indent=2)
+                except Exception:
+                    pass
+                return migrated
+        except Exception:
+            pass
+
+    # 3. Built-in defaults
+    return _default_exam_dict()
+
+
+def save_exam_bank(bank: dict) -> bool:
+    try:
+        with open(EXAM_BANK_PATH, "w", encoding="utf-8") as fh:
+            json.dump(bank, fh, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def get_exam(bank: dict, exam_id: str) -> dict:
+    """Return the exam dict for the given id (or an empty shell)."""
+    return (bank or {}).get(exam_id) or {
+        "name": exam_id, "duration_minutes": 30, "pass_mark": 0.80, "questions": []
+    }
+
+
+def list_exams(bank: dict):
+    """Return a list of (exam_id, exam_name, question_count) tuples."""
+    out = []
+    for eid, edata in (bank or {}).items():
+        out.append((eid, edata.get("name", eid), len(edata.get("questions", []))))
+    return out
+
+
 # ==============================================================================
 # SESSION STATE
 # ==============================================================================
@@ -527,7 +750,10 @@ _defaults = {
     "user": None,
     "registered_users": {},
     "login_time": None,
-    # exam
+    # exam bank + selected set
+    "exam_bank": {},              # { exam_id: { name, duration_minutes, pass_mark, questions: [] } }
+    "active_exam_id": None,       # which exam set the candidate is currently taking
+    # exam runtime
     "exam_started": False,
     "exam_submitted": False,
     "exam_paper": [],
@@ -540,6 +766,8 @@ _defaults = {
     "exam_attempts": 0,
     "exam_agree": False,
     "exam_review_mode": False,
+    # admin page helpers
+    "admin_selected_exam": None,
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
@@ -557,17 +785,9 @@ def total_score():
 
 
 # ==============================================================================
-# EXAM QUESTION BANK
+# EXAM QUESTION BANK (built-in defaults — used only if no JSON exists)
 # ==============================================================================
-EXAM_CONFIG = {
-    "duration_minutes": 30,
-    "pass_mark": 0.80,
-    "shuffle_questions": True,
-    "shuffle_options": True,
-}
-
-EXAM_QUESTIONS = [
-    # ---------------- Section 1 — Purpose & Governance ----------------
+DEFAULT_EXAM_QUESTIONS = [
     {
         "id": "Q01",
         "section": "1. Purpose & Governance",
@@ -594,7 +814,6 @@ EXAM_QUESTIONS = [
         "answer": "They are mandatory for all new development work and applicable maintenance changes",
         "explanation": "The standards are mandatory across implementation, testing, code review and deployment.",
     },
-    # ---------------- Section 2 — TypeScript ----------------
     {
         "id": "Q03",
         "section": "2. TypeScript Type Safety",
@@ -614,7 +833,7 @@ EXAM_QUESTIONS = [
             "Add `// @ts-ignore` on the line above instead",
         ],
         "answer": "Document the reason and keep the usage limited to that boundary",
-        "explanation": "Only documented, boundary-limited `any` usage is acceptable. Undocumented, spread-out `any` is not.",
+        "explanation": "Only documented, boundary-limited `any` usage is acceptable.",
     },
     {
         "id": "Q05",
@@ -668,7 +887,6 @@ EXAM_QUESTIONS = [
         "answer": "Keep them as Decimal and pass them through the standard type-safe converters (e.g. `withOptionalCheckDecimal`)",
         "explanation": "Casting Decimal to number loses precision — a serious defect in financial systems.",
     },
-    # ---------------- Section 3 — Git workflow ----------------
     {
         "id": "Q09",
         "section": "3. Git Branching & Workflow",
@@ -709,7 +927,7 @@ EXAM_QUESTIONS = [
             "bugfix/4472 → dev",
         ],
         "answer": "feature/4471 → qa directly",
-        "explanation": "Only `dev` → `qa` promotions are permitted. Feature branches never merge straight into QA.",
+        "explanation": "Only `dev` → `qa` promotions are permitted.",
     },
     {
         "id": "Q13",
@@ -724,7 +942,6 @@ EXAM_QUESTIONS = [
         "answer": "Do not branch from it; fetch origin and create the new branch from the latest `dev`",
         "explanation": "Never branch from a stale local branch — you would inherit obsolete code and merge conflicts.",
     },
-    # ---------------- Section 4 — Developer testing ----------------
     {
         "id": "Q14",
         "section": "4. Developer Testing",
@@ -777,7 +994,6 @@ EXAM_QUESTIONS = [
         "answer": "Waiting for the QA team to run the regression pack first",
         "explanation": "QA is a downstream gate — it is never a substitute for developer self-verification.",
     },
-    # ---------------- Section 5 & 6 — SQL / performance ----------------
     {
         "id": "Q18",
         "section": "5. SQL Performance",
@@ -823,7 +1039,7 @@ EXAM_QUESTIONS = [
             "Fetching with `SELECT *` and filtering in code",
         ],
         "answer": "Raw SQL selecting only the required columns with an explicit `LIMIT`",
-        "explanation": "Retrieve only what you need. Eager-loading full entities across multiple joins transfers far more data than required.",
+        "explanation": "Retrieve only what you need.",
     },
     {
         "id": "Q22",
@@ -836,7 +1052,7 @@ EXAM_QUESTIONS = [
             "It prevents parameterisation",
         ],
         "answer": "It retrieves columns that are not needed, increasing I/O, network and hydration cost",
-        "explanation": "List columns explicitly — ideally through a mapper schema — so only required data is retrieved.",
+        "explanation": "List columns explicitly — ideally through a mapper schema.",
     },
     {
         "id": "Q23",
@@ -851,7 +1067,6 @@ EXAM_QUESTIONS = [
         "answer": "It is an N+1 query problem — fix it with a JOIN or a batched `IN (...)` query",
         "explanation": "One query per row multiplies round-trips. Batch or join instead.",
     },
-    # ---------------- Section 7 — Code review ----------------
     {
         "id": "Q24",
         "section": "7. Code Review & PR Quality",
@@ -876,7 +1091,7 @@ EXAM_QUESTIONS = [
             "It uses a reserved keyword",
         ],
         "answer": "It is vulnerable to SQL injection because user input is interpolated directly into the SQL string",
-        "explanation": "Always use parameterised queries with `?` placeholders — never string interpolation.",
+        "explanation": "Always use parameterised queries with `?` placeholders.",
     },
     {
         "id": "Q26",
@@ -889,7 +1104,7 @@ EXAM_QUESTIONS = [
             "Only for SELECT statements",
         ],
         "answer": "No — raw SQL is acceptable and is often preferred for performance-sensitive queries",
-        "explanation": "Section 6.1 explicitly prefers raw SQL where performance matters. Raw SQL itself is compliant; unsafe, untyped raw SQL is not.",
+        "explanation": "Section 6.1 explicitly prefers raw SQL where performance matters.",
     },
     {
         "id": "Q27",
@@ -902,9 +1117,8 @@ EXAM_QUESTIONS = [
             "Ask QA to test it directly on the branch",
         ],
         "answer": "Reject / request changes: wrong target branch, no approvals, failing checks and bypassed type safety",
-        "explanation": "Reviewers must enforce every requirement — not just the code logic.",
+        "explanation": "Reviewers must enforce every requirement.",
     },
-    # ---------------- Section 8 — Automated testing ----------------
     {
         "id": "Q28",
         "section": "8. Automated Testing",
@@ -916,7 +1130,7 @@ EXAM_QUESTIONS = [
             "Ask QA to rerun it later",
         ],
         "answer": "Investigate and identify the root cause (implementation, test, configuration or environment), fix it and rerun",
-        "explanation": "Never treat a symptom. Investigate first — environment and data volume differences are common causes.",
+        "explanation": "Never treat a symptom.",
     },
     {
         "id": "Q29",
@@ -931,7 +1145,6 @@ EXAM_QUESTIONS = [
         "answer": "No — failures must be investigated and resolved; disabling tests is never the correct response",
         "explanation": "Bypassing required checks is explicitly prohibited.",
     },
-    # ---------------- Section 9 & 10 — Workflow & accountability ----------------
     {
         "id": "Q30",
         "section": "9. Development Workflow",
@@ -951,7 +1164,7 @@ EXAM_QUESTIONS = [
             "Requirement Analysis → Branch Preparation → Implementation → PR to DEV → Developer Validation → Merge to DEV → Automated Testing & Staging → QA Promotion",
         ],
         "answer": "Requirement Analysis → Branch Preparation → Implementation → Developer Validation → PR to DEV → Merge to DEV → QA Promotion → Automated Testing & Staging",
-        "explanation": "Developer validation always precedes the PR; promotion to QA happens after the dev merge.",
+        "explanation": "Developer validation always precedes the PR.",
     },
     {
         "id": "Q32",
@@ -964,7 +1177,7 @@ EXAM_QUESTIONS = [
             "Adding parameterised queries",
         ],
         "answer": "Sending an initial feature PR directly to `qa`",
-        "explanation": "Direct feature → QA merges are prohibited. Only `dev` → `qa` promotions are permitted.",
+        "explanation": "Only `dev` → `qa` promotions are permitted.",
     },
     {
         "id": "Q33",
@@ -977,14 +1190,59 @@ EXAM_QUESTIONS = [
             "Move the aggregation into the application layer so the database does less work",
         ],
         "answer": "Run `EXPLAIN ANALYZE` with 2,000–3,000 representative rows, attach the evidence to the issue, and fix any bottlenecks",
-        "explanation": "Performance must be validated with realistic data, and the evidence attached to the Git issue.",
+        "explanation": "Performance must be validated with realistic data.",
     },
 ]
 
 
+# --- Load the exam bank now that DEFAULT_EXAM_QUESTIONS is defined ---
+if not st.session_state.exam_bank:
+    st.session_state.exam_bank = load_exam_bank()
+
+# Set a sane default active exam
+if not st.session_state.active_exam_id:
+    _bank_ids = list(st.session_state.exam_bank.keys())
+    if _bank_ids:
+        st.session_state.active_exam_id = _bank_ids[0]
+
+
+# ==============================================================================
+# EXAM HELPERS (multi-set aware)
+# ==============================================================================
+EXAM_CONFIG = {
+    "shuffle_questions": True,
+    "shuffle_options": True,
+}
+
+
+def _active_exam() -> dict:
+    """Return the currently selected exam dict (or an empty shell)."""
+    bank = st.session_state.exam_bank or {}
+    eid = st.session_state.active_exam_id
+    if not eid or eid not in bank:
+        if bank:
+            eid = next(iter(bank.keys()))
+            st.session_state.active_exam_id = eid
+        else:
+            return {"name": "(no exams configured)", "duration_minutes": 30, "pass_mark": 0.80, "questions": []}
+    return bank[eid]
+
+
+def _active_exam_questions() -> list:
+    return list(_active_exam().get("questions", []))
+
+
+def _active_duration_minutes() -> int:
+    return int(_active_exam().get("duration_minutes", 30))
+
+
+def _active_pass_mark() -> float:
+    return float(_active_exam().get("pass_mark", 0.80))
+
+
 def _build_exam_paper():
     paper = []
-    for q in EXAM_QUESTIONS:
+    for q in _active_exam_questions():
         opts = list(q["options"])
         if EXAM_CONFIG["shuffle_options"]:
             random.shuffle(opts)
@@ -996,9 +1254,9 @@ def _build_exam_paper():
 
 def _exam_remaining_seconds():
     if not st.session_state.exam_started or not st.session_state.exam_start_ts:
-        return EXAM_CONFIG["duration_minutes"] * 60
+        return _active_duration_minutes() * 60
     elapsed = time.time() - st.session_state.exam_start_ts
-    return max(0, EXAM_CONFIG["duration_minutes"] * 60 - elapsed)
+    return max(0, _active_duration_minutes() * 60 - elapsed)
 
 
 def _reset_exam():
@@ -1018,6 +1276,9 @@ def _reset_exam():
 def _grade_exam():
     paper = st.session_state.exam_paper
     answers = st.session_state.exam_answers
+    exam_id = st.session_state.active_exam_id
+    exam_name = _active_exam().get("name", exam_id)
+
     results = []
     for i, q in enumerate(paper):
         given = answers.get(q["id"])
@@ -1043,6 +1304,8 @@ def _grade_exam():
     duration = st.session_state.exam_end_ts - (st.session_state.exam_start_ts or st.session_state.exam_end_ts)
     save_submission({
         "user": st.session_state.user,
+        "exam_id": exam_id,
+        "exam_name": exam_name,
         "submitted_at": datetime.now().isoformat(timespec="seconds"),
         "score": score,
         "total": len(results),
@@ -1060,7 +1323,7 @@ def _grade_exam():
 def s_exam():
     header(
         "Final Exam — Developer Standards",
-        "Graded assessment · your results are recorded and can be downloaded",
+        "Graded assessment · pick a question set, then sit the exam",
         "EXAM",
     )
 
@@ -1074,7 +1337,40 @@ def s_exam():
 
 
 def _render_exam_intro():
-    total = len(EXAM_QUESTIONS)
+    bank = st.session_state.exam_bank or {}
+    available = list_exams(bank)
+
+    if not available:
+        st.error("No exams are configured. An administrator must create at least one exam set.")
+        return
+
+    # ---- exam set picker ----
+    st.markdown("### 🗂 Choose a question set")
+    if len(available) == 1:
+        eid, ename, qcount = available[0]
+        st.session_state.active_exam_id = eid
+        st.info(f"Only one exam set is available — **{ename}** ({qcount} questions).")
+    else:
+        options = {f"{ename}  ·  {qcount} questions": eid for eid, ename, qcount in available}
+        # Preserve current selection if possible
+        current = st.session_state.active_exam_id
+        current_label = next((k for k, v in options.items() if v == current), list(options.keys())[0])
+        default_idx = list(options.keys()).index(current_label)
+
+        pick = st.selectbox(
+            "Which exam set do you want to take?",
+            list(options.keys()),
+            index=default_idx,
+            key="exam_set_picker",
+        )
+        st.session_state.active_exam_id = options[pick]
+
+    exam = _active_exam()
+    questions = exam.get("questions", [])
+    total = len(questions)
+    duration_min = int(exam.get("duration_minutes", 30))
+    pass_mark_pct = int(exam.get("pass_mark", 0.80) * 100)
+
     st.markdown("### 📋 Exam instructions")
     c1, c2 = st.columns([1.25, 1])
     with c1:
@@ -1083,12 +1379,12 @@ def _render_exam_intro():
             <div class="exam-card">
               <h4 style="color:#0B3C5D;margin-top:0;">Before you begin</h4>
               <ul style="font-size:.88rem;line-height:1.85;margin:0;padding-left:20px;">
-                <li>The exam contains <b>{total} multiple-choice questions</b> covering every section of the standards.</li>
-                <li>You have <b>{EXAM_CONFIG['duration_minutes']} minutes</b>. The exam auto-submits when the timer reaches zero.</li>
-                <li>The pass mark is <b>{int(EXAM_CONFIG['pass_mark']*100)}%</b>. Each question is worth one mark.</li>
+                <li><b>Exam set:</b> {html_lib.escape(exam.get('name','—'))}</li>
+                <li>The exam contains <b>{total} multiple-choice questions</b>.</li>
+                <li>You have <b>{duration_min} minutes</b>. The exam auto-submits when the timer reaches zero.</li>
+                <li>The pass mark is <b>{pass_mark_pct}%</b>. Each question is worth one mark.</li>
                 <li>Questions and answer options are <b>shuffled</b> for every attempt.</li>
                 <li>You can move backwards and forwards and change answers until you submit.</li>
-                <li>Once submitted, your answers are locked and your results can be downloaded.</li>
                 <li>No negative marking — always answer every question.</li>
               </ul>
             </div>
@@ -1096,9 +1392,9 @@ def _render_exam_intro():
             unsafe_allow_html=True,
         )
     with c2:
-        kpi_row([("Questions", str(total)), ("Duration", f"{EXAM_CONFIG['duration_minutes']} min")])
+        kpi_row([("Questions", str(total)), ("Duration", f"{duration_min} min")])
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-        kpi_row([("Pass mark", f"{int(EXAM_CONFIG['pass_mark']*100)}%"), ("Attempts", str(st.session_state.exam_attempts))])
+        kpi_row([("Pass mark", f"{pass_mark_pct}%"), ("Attempts", str(st.session_state.exam_attempts))])
 
     st.markdown("---")
     st.markdown("#### ✍️ Candidate")
@@ -1117,9 +1413,16 @@ def _render_exam_intro():
     )
     c1, c2 = st.columns([1, 3])
     with c1:
-        start = st.button("🚀 Start exam", type="primary", use_container_width=True, disabled=not agree)
+        start = st.button(
+            "🚀 Start exam",
+            type="primary",
+            use_container_width=True,
+            disabled=(not agree) or (total == 0),
+        )
     with c2:
-        if st.session_state.exam_attempts > 0:
+        if total == 0:
+            st.warning("This exam set has no questions. Ask an administrator to add some.")
+        elif st.session_state.exam_attempts > 0:
             st.caption(f"You have completed {st.session_state.exam_attempts} attempt(s). Retaking is allowed; your latest score is recorded.")
 
     if start:
@@ -1136,6 +1439,7 @@ def _render_exam_intro():
 def _render_exam_running():
     paper = st.session_state.exam_paper
     total = len(paper)
+    exam_name = _active_exam().get("name", "—")
 
     # ---- timer ----
     remaining = _exam_remaining_seconds()
@@ -1147,11 +1451,12 @@ def _render_exam_running():
     mins, secs = divmod(int(remaining), 60)
     answered_count = sum(1 for q in paper if st.session_state.exam_answers.get(q["id"]))
 
-    c1, c2, c3 = st.columns([1, 1, 1])
+    c1, c2, c3 = st.columns([1.4, 1, 1])
     with c1:
         warn = " timer-warn" if remaining < 300 else ""
         st.markdown(
-            f'<div class="timer-box{warn}">⏱ {mins:02d}:{secs:02d}</div>',
+            f'<div class="timer-box{warn}">⏱ {mins:02d}:{secs:02d}</div>'
+            f'<span class="set-badge">{html_lib.escape(exam_name)}</span>',
             unsafe_allow_html=True,
         )
     with c2:
@@ -1175,9 +1480,7 @@ def _render_exam_running():
         unsafe_allow_html=True,
     )
 
-    # =========================================================================
-    # REVIEW MODE  (must run BEFORE we touch paper[idx])
-    # =========================================================================
+    # ---- review mode ----
     if st.session_state.exam_review_mode:
         st.markdown("---")
         st.markdown("### 📋 Review your answers")
@@ -1218,9 +1521,7 @@ def _render_exam_running():
                 st.rerun()
         return
 
-    # =========================================================================
-    # NORMAL QUESTION MODE
-    # =========================================================================
+    # ---- normal question mode ----
     idx = st.session_state.exam_idx
     if idx < 0:
         idx = 0
@@ -1296,7 +1597,10 @@ def _render_exam_results():
     score = st.session_state.exam_score
     total = len(results)
     pct = score / total * 100 if total else 0
-    passed = pct >= EXAM_CONFIG["pass_mark"] * 100
+    pass_mark_pct = int(_active_pass_mark() * 100)
+    passed = pct >= pass_mark_pct
+
+    exam_name = _active_exam().get("name", "—")
 
     duration_secs = int((st.session_state.exam_end_ts or 0) - (st.session_state.exam_start_ts or 0))
     duration_txt = f"{duration_secs // 60} min {duration_secs % 60} sec"
@@ -1305,19 +1609,18 @@ def _render_exam_results():
         st.success(f"🏆 **PASSED** — {score}/{total} ({pct:.1f}%). Excellent work.")
         st.balloons()
     else:
-        st.error(f"❌ **NOT PASSED** — {score}/{total} ({pct:.1f}%). The pass mark is {int(EXAM_CONFIG['pass_mark']*100)}%.")
+        st.error(f"❌ **NOT PASSED** — {score}/{total} ({pct:.1f}%). The pass mark is {pass_mark_pct}%.")
 
     kpi_row([
+        ("Exam set", exam_name),
         ("Score", f"{score} / {total}"),
         ("Percentage", f"{pct:.1f}%"),
-        ("Pass mark", f"{int(EXAM_CONFIG['pass_mark']*100)}%"),
         ("Time taken", duration_txt),
     ])
 
     st.progress(min(pct / 100, 1.0))
     st.markdown("---")
 
-    # ---- per-section breakdown (uses lowercase 'section' key) ----
     df = pd.DataFrame(results)
     sec = (
         df.groupby("section")
@@ -1343,7 +1646,7 @@ def _render_exam_results():
                 marker_color=["#1E8449" if p >= 80 else ("#D9A441" if p >= 50 else "#C0392B") for p in sec["Percent"]],
             )
         )
-        fig.add_hline(y=80, line_dash="dash", line_color="#0B3C5D", annotation_text="Pass 80%")
+        fig.add_hline(y=pass_mark_pct, line_dash="dash", line_color="#0B3C5D", annotation_text=f"Pass {pass_mark_pct}%")
         fig.update_layout(
             height=330,
             margin=dict(l=10, r=10, t=20, b=10),
@@ -1354,7 +1657,6 @@ def _render_exam_results():
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # ---- download ----
     st.markdown("---")
     st.markdown("### 📥 Download your results")
     st.caption("Download your results below and submit them to your examiner or administrator.")
@@ -1364,6 +1666,8 @@ def _render_exam_results():
 
     export = {
         "candidate": st.session_state.user,
+        "exam_id": st.session_state.active_exam_id,
+        "exam_name": exam_name,
         "submitted_at": datetime.now().isoformat(timespec="seconds"),
         "score": score,
         "total": total,
@@ -1377,6 +1681,7 @@ def _render_exam_results():
     txt_lines = [
         "DEVELOPER STANDARDS — FINAL EXAM SUBMISSION",
         "=" * 52,
+        f"Exam set  : {exam_name}",
         f"Candidate : {(st.session_state.user or {}).get('name','')}",
         f"Username  : {username}",
         f"Email     : {(st.session_state.user or {}).get('email','')}",
@@ -1414,7 +1719,7 @@ def _render_exam_results():
         st.download_button(
             "📥 Download TXT",
             data=txt_body,
-            file_name=f"exam_{username}_{ts}.txt",
+            file_name=f"exam_{st.session_state.active_exam_id}_{username}_{ts}.txt",
             mime="text/plain",
             use_container_width=True,
         )
@@ -1422,7 +1727,7 @@ def _render_exam_results():
         st.download_button(
             "📥 Download CSV",
             data=csv_df.to_csv(index=False),
-            file_name=f"exam_{username}_{ts}.csv",
+            file_name=f"exam_{st.session_state.active_exam_id}_{username}_{ts}.csv",
             mime="text/csv",
             use_container_width=True,
         )
@@ -1430,12 +1735,11 @@ def _render_exam_results():
         st.download_button(
             "📥 Download JSON",
             data=json.dumps(export, indent=2, default=str),
-            file_name=f"exam_{username}_{ts}.json",
+            file_name=f"exam_{st.session_state.active_exam_id}_{username}_{ts}.json",
             mime="application/json",
             use_container_width=True,
         )
 
-    # ---- full review ----
     st.markdown("---")
     with st.expander("🔍 Full question-by-question review", expanded=False):
         for r in results:
@@ -1475,6 +1779,7 @@ def s_submissions():
         u = d.get("user") or {}
         rows.append({
             "Submitted": d.get("submitted_at", ""),
+            "Exam set": d.get("exam_name", d.get("exam_id", "—")),
             "Name": u.get("name", ""),
             "Username": u.get("username", ""),
             "Email": u.get("email", ""),
@@ -1484,42 +1789,68 @@ def s_submissions():
         })
     df = pd.DataFrame(rows)
 
+    # ---- filters ----
+    st.markdown("### Filters")
+    c1, c2 = st.columns(2)
+    with c1:
+        exam_filter = st.selectbox(
+            "Exam set",
+            ["All"] + sorted(df["Exam set"].unique().tolist()),
+            key="sub_exam_filter",
+        )
+    with c2:
+        user_filter = st.selectbox(
+            "Candidate",
+            ["All"] + sorted(df["Username"].unique().tolist()),
+            key="sub_user_filter",
+        )
+
+    view = df.copy()
+    if exam_filter != "All":
+        view = view[view["Exam set"] == exam_filter]
+    if user_filter != "All":
+        view = view[view["Username"] == user_filter]
+
     # ---- summary stats ----
-    total_subs = len(df)
-    unique_users = df["Username"].nunique() if "Username" in df else 0
-    pass_count = int((df["Percent"] >= EXAM_CONFIG["pass_mark"] * 100).sum()) if "Percent" in df else 0
-    avg_pct = float(df["Percent"].mean()) if "Percent" in df else 0.0
+    total_subs = len(view)
+    unique_users = view["Username"].nunique() if "Username" in view else 0
+    pass_count = int((view["Percent"] >= 80).sum()) if "Percent" in view else 0
+    avg_pct = float(view["Percent"].mean()) if "Percent" in view else 0.0
 
     kpi_row([
         ("Submissions", str(total_subs)),
         ("Unique candidates", str(unique_users)),
-        ("Passed", f"{pass_count}/{total_subs}"),
+        ("Passed (≥80%)", f"{pass_count}/{total_subs}"),
         ("Average %", f"{avg_pct:.1f}%"),
     ])
 
     st.markdown("---")
-    st.markdown("### All submissions")
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.markdown("### Submissions")
+    st.dataframe(view, hide_index=True, use_container_width=True)
 
     st.download_button(
-        "📥 Download all submissions (CSV)",
-        data=df.to_csv(index=False),
+        "📥 Download view (CSV)",
+        data=view.to_csv(index=False),
         file_name=f"exam_submissions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
     )
 
-    # ---- individual candidate drill-down ----
+    # ---- candidate drill-down ----
     st.markdown("---")
     st.markdown("### Candidate detail")
-    candidates = sorted(df["Username"].unique().tolist())
+    candidates = sorted(view["Username"].unique().tolist()) if not view.empty else []
     if candidates:
         pick = st.selectbox("Select a candidate", ["— select —"] + candidates, key="sub_pick")
         if pick and pick != "— select —":
-            sub = next((d for d in reversed(data) if (d.get("user") or {}).get("username") == pick), None)
+            matching = [d for d in reversed(data) if (d.get("user") or {}).get("username") == pick]
+            if exam_filter != "All":
+                matching = [d for d in matching if d.get("exam_name") == exam_filter]
+            sub = matching[0] if matching else None
             if sub:
                 u = sub.get("user") or {}
                 st.markdown(
                     f"**{u.get('name','')}** · {u.get('email','')}  \n"
+                    f"Exam: **{sub.get('exam_name', sub.get('exam_id','—'))}**  \n"
                     f"Submitted: `{sub.get('submitted_at','')}`  \n"
                     f"Score: **{sub.get('score')}/{sub.get('total')}** ({sub.get('percent')}%)  \n"
                     f"Attempt: {sub.get('attempt')}"
@@ -1533,7 +1864,7 @@ def s_submissions():
                     })
                 st.dataframe(pd.DataFrame(ans_rows), hide_index=True, use_container_width=True)
 
-    # ---- clear all ----
+    # ---- danger zone ----
     st.markdown("---")
     with st.expander("⚠️ Danger zone"):
         st.caption("Deleting submissions is permanent and affects every administrator.")
@@ -1546,6 +1877,259 @@ def s_submissions():
                 st.rerun()
             except Exception as exc:
                 st.error(f"Could not delete submissions: {exc}")
+
+
+# ==============================================================================
+# ADMIN — EXAM & QUESTION MANAGEMENT (multi-set)
+# ==============================================================================
+def s_question_management():
+    header(
+        "Exam & Question Management",
+        "Create exam sets and manage the questions inside each one",
+        "ADMIN",
+    )
+
+    role = (st.session_state.user or {}).get("role")
+    if role not in ("admin", "super_admin"):
+        st.error("🚫 Access denied. Only administrators can manage exams and questions.")
+        return
+
+    bank = st.session_state.exam_bank
+    st.info(
+        "Changes made here are saved to `exam_bank.json` and take effect for all future exam attempts. "
+        "Each **exam set** is a separate pool of questions — candidates pick one set before starting."
+    )
+
+    tab_sets, tab_questions = st.tabs(["🗂 Exam Sets", "❓ Questions"])
+
+    # =========================================================================
+    # TAB 1 — EXAM SETS
+    # =========================================================================
+    with tab_sets:
+        st.markdown("### Existing exam sets")
+
+        if not bank:
+            st.warning("No exam sets exist yet. Create one below.")
+        else:
+            summary_rows = []
+            for eid, edata in bank.items():
+                summary_rows.append({
+                    "Exam ID": eid,
+                    "Name": edata.get("name", eid),
+                    "Questions": len(edata.get("questions", [])),
+                    "Duration (min)": edata.get("duration_minutes", 30),
+                    "Pass mark": f"{int(edata.get('pass_mark', 0.80) * 100)}%",
+                })
+            st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("#### Edit an exam set")
+            edit_id = st.selectbox(
+                "Select an exam set to edit",
+                ["— select —"] + list(bank.keys()),
+                key="exam_edit_select",
+            )
+            if edit_id and edit_id != "— select —":
+                edata = bank[edit_id]
+
+                with st.form(f"edit_exam_{edit_id}"):
+                    new_name = st.text_input("Exam name", value=edata.get("name", edit_id))
+                    cc1, cc2 = st.columns(2)
+                    with cc1:
+                        new_duration = st.number_input(
+                            "Duration (minutes)",
+                            min_value=1, max_value=300,
+                            value=int(edata.get("duration_minutes", 30)),
+                            step=1,
+                        )
+                    with cc2:
+                        new_pass = st.number_input(
+                            "Pass mark (%)",
+                            min_value=1, max_value=100,
+                            value=int(edata.get("pass_mark", 0.80) * 100),
+                            step=1,
+                        )
+                    save_edit = st.form_submit_button("💾 Save changes", type="primary", use_container_width=True)
+
+                if save_edit:
+                    edata["name"] = new_name.strip() or edit_id
+                    edata["duration_minutes"] = int(new_duration)
+                    edata["pass_mark"] = round(float(new_pass) / 100.0, 4)
+                    if save_exam_bank(bank):
+                        st.success(f"✅ Updated **{edata['name']}**.")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to save changes.")
+
+                # Delete exam set
+                st.markdown("---")
+                st.markdown("#### ⚠️ Delete this exam set")
+                st.caption("This permanently removes the exam set and every question inside it.")
+                confirm_del = st.checkbox(
+                    f"I understand this will delete **{edata.get('name', edit_id)}** and all its questions.",
+                    key=f"confirm_del_{edit_id}",
+                )
+                if st.button("🗑 Delete exam set", disabled=not confirm_del, type="secondary"):
+                    bank.pop(edit_id, None)
+                    if save_exam_bank(bank):
+                        # reset active selection if needed
+                        if st.session_state.active_exam_id == edit_id:
+                            st.session_state.active_exam_id = next(iter(bank.keys()), None)
+                        st.success("Exam set deleted.")
+                        st.rerun()
+                    else:
+                        st.error("Failed to save after deletion.")
+
+        # ---- Create new exam set ----
+        st.markdown("---")
+        st.markdown("### ➕ Create a new exam set")
+        with st.form("create_exam_form", clear_on_submit=True):
+            n_name = st.text_input("Exam name", placeholder="e.g. Exam 02 — Advanced Standards")
+            n_desc = st.text_input("Description (optional)", placeholder="e.g. Advanced SQL and review scenarios")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                n_duration = st.number_input("Duration (minutes)", min_value=1, max_value=300, value=30, step=1)
+            with cc2:
+                n_pass = st.number_input("Pass mark (%)", min_value=1, max_value=100, value=80, step=1)
+            created = st.form_submit_button("➕ Create exam set", type="primary", use_container_width=True)
+
+        if created:
+            if not n_name.strip():
+                st.error("❌ Exam name is required.")
+            else:
+                base_id = slugify(n_name)
+                new_id = base_id
+                suffix = 2
+                while new_id in bank:
+                    new_id = f"{base_id}_{suffix}"
+                    suffix += 1
+
+                bank[new_id] = {
+                    "name": n_name.strip(),
+                    "description": n_desc.strip(),
+                    "duration_minutes": int(n_duration),
+                    "pass_mark": round(float(n_pass) / 100.0, 4),
+                    "questions": [],
+                }
+                if save_exam_bank(bank):
+                    st.session_state.admin_selected_exam = new_id
+                    st.success(f"✅ Exam set **{n_name.strip()}** created (`{new_id}`). Add questions in the Questions tab.")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to save the new exam set.")
+
+    # =========================================================================
+    # TAB 2 — QUESTIONS
+    # =========================================================================
+    with tab_questions:
+        if not bank:
+            st.warning("Create an exam set first (see the **Exam Sets** tab).")
+            return
+
+        # ---- pick which exam we're editing ----
+        exam_ids = list(bank.keys())
+        # honour admin_selected_exam if it's valid
+        if st.session_state.admin_selected_exam not in exam_ids:
+            st.session_state.admin_selected_exam = exam_ids[0]
+
+        current_exam_id = st.selectbox(
+            "Exam set",
+            exam_ids,
+            index=exam_ids.index(st.session_state.admin_selected_exam),
+            format_func=lambda eid: f"{bank[eid].get('name', eid)} ({len(bank[eid].get('questions', []))} questions)",
+            key="qmgmt_exam_picker",
+        )
+        st.session_state.admin_selected_exam = current_exam_id
+        edata = bank[current_exam_id]
+        questions = edata.get("questions", [])
+
+        # ---- list current questions ----
+        st.markdown(f"### Questions in **{edata.get('name', current_exam_id)}** ({len(questions)})")
+        if not questions:
+            st.info("No questions yet in this exam set. Add one below.")
+        else:
+            for i, q in enumerate(questions):
+                with st.expander(f"{(q.get('id') or f'Q{i+1:02d}')}  ·  {q.get('section', 'Uncategorized')}  —  {q.get('question','')[:70]}..."):
+                    st.markdown(f"**Question:** {q.get('question','')}")
+                    for o in q.get("options", []):
+                        prefix = "✅" if o == q.get("answer") else "○"
+                        st.markdown(f"{prefix} {o}")
+                    st.caption(f"**Explanation:** {q.get('explanation','')}")
+
+                    if st.button("🗑 Delete this question", key=f"del_q_{current_exam_id}_{i}"):
+                        questions.pop(i)
+                        edata["questions"] = questions
+                        if save_exam_bank(bank):
+                            st.success("Question deleted.")
+                            st.rerun()
+                        else:
+                            st.error("Failed to save after deletion.")
+
+        # ---- add new question ----
+        st.markdown("---")
+        st.markdown(f"### ➕ Add a question to **{edata.get('name', current_exam_id)}**")
+        with st.form(f"add_question_form_{current_exam_id}", clear_on_submit=True):
+            q_section = st.text_input("Section", value="1. Purpose & Governance")
+            q_text = st.text_area("Question text", height=90)
+
+            st.markdown("**Options** — all four are required")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                q_opt1 = st.text_input("Option A")
+                q_opt3 = st.text_input("Option C")
+            with cc2:
+                q_opt2 = st.text_input("Option B")
+                q_opt4 = st.text_input("Option D")
+
+            options = [q_opt1.strip(), q_opt2.strip(), q_opt3.strip(), q_opt4.strip()]
+            valid_options = [o for o in options if o]
+            q_ans = st.selectbox(
+                "Correct answer",
+                valid_options if valid_options else ["— fill options first —"],
+            )
+            q_exp = st.text_area("Explanation", height=70)
+            add_btn = st.form_submit_button("➕ Add question", type="primary", use_container_width=True)
+
+        if add_btn:
+            errs = []
+            if not q_text.strip():
+                errs.append("Question text is required.")
+            if any(not o for o in options):
+                errs.append("All four options are required.")
+            if not q_ans or q_ans == "— fill options first —":
+                errs.append("You must select a correct answer.")
+            if not q_section.strip():
+                errs.append("Section is required.")
+
+            if errs:
+                for e in errs:
+                    st.error(f"❌ {e}")
+            else:
+                # per-exam question id counter
+                existing_ids = [q.get("id", "") for q in questions if q.get("id", "").startswith("Q")]
+                nums = []
+                for eid in existing_ids:
+                    m = re.match(r"^Q(\d+)$", eid)
+                    if m:
+                        nums.append(int(m.group(1)))
+                next_num = (max(nums) + 1) if nums else 1
+                new_qid = f"Q{next_num:02d}"
+
+                new_q = {
+                    "id": new_qid,
+                    "section": q_section.strip(),
+                    "question": q_text.strip(),
+                    "options": options,
+                    "answer": q_ans,
+                    "explanation": q_exp.strip(),
+                }
+                questions.append(new_q)
+                edata["questions"] = questions
+                if save_exam_bank(bank):
+                    st.success(f"✅ Question {new_qid} added to **{edata.get('name', current_exam_id)}**.")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to save the question.")
 
 
 # ==============================================================================
@@ -1568,7 +2152,6 @@ def s_admin_management():
         "**developer** role — they can never create or log in as an administrator."
     )
 
-    # ---- list existing admins ----
     st.markdown("### Existing administrator accounts")
     users = load_users()
     admin_rows = []
@@ -1587,8 +2170,6 @@ def s_admin_management():
         st.info("No administrator accounts found.")
 
     st.markdown("---")
-
-    # ---- create a new admin account ----
     st.markdown("### Create a new administrator account")
     with st.form("create_admin_form", clear_on_submit=True):
         a_name = st.text_input("Full name")
@@ -1641,6 +2222,7 @@ def s_admin_management():
 # ==============================================================================
 def s_title():
     u = st.session_state.user or {}
+    total_qs = sum(len(e.get("questions", [])) for e in (st.session_state.exam_bank or {}).values())
     st.markdown(
         f"""
         <div class="hero">
@@ -1654,9 +2236,9 @@ def s_title():
     kpi_row(
         [
             ("Status", "MANDATORY"),
-            ("Slides", "16"),
-            ("Exam Questions", str(len(EXAM_QUESTIONS))),
-            ("Pass Mark", f"{int(EXAM_CONFIG['pass_mark']*100)}%"),
+            ("Exam Sets", str(len(st.session_state.exam_bank or {}))),
+            ("Total Questions", str(total_qs)),
+            ("Pass Mark", "80% (default)"),
         ]
     )
     st.markdown("---")
@@ -1670,8 +2252,8 @@ def s_title():
         )
         card(
             "Graded final exam",
-            f"<b>{len(EXAM_QUESTIONS)} exam questions</b>, {EXAM_CONFIG['duration_minutes']} minutes, "
-            "shuffled questions and options, auto-submit on timeout, and a per-section performance breakdown. "
+            f"<b>{len(st.session_state.exam_bank or {})} exam set(s)</b> available. "
+            "Shuffled questions and options, auto-submit on timeout, per-section performance breakdown. "
             "Your results are <b>recorded locally and can be downloaded</b>.",
             "card-navy",
         )
@@ -3102,9 +3684,10 @@ def s_dashboard():
         total_q = len(st.session_state.exam_results)
         ex = st.session_state.exam_score
         ex_pct = ex / total_q * 100 if total_q else 0
+        pass_mark_pct = int(_active_pass_mark() * 100)
         st.markdown(
             f'<div class="kpi"><div class="v">{ex} / {total_q}</div>'
-            f'<div class="l">Final Exam — {"PASSED" if ex_pct >= EXAM_CONFIG["pass_mark"]*100 else "NOT PASSED"} ({ex_pct:.0f}%)</div></div>',
+            f'<div class="l">Final Exam — {"PASSED" if ex_pct >= pass_mark_pct else "NOT PASSED"} ({ex_pct:.0f}%)</div></div>',
             unsafe_allow_html=True,
         )
     else:
@@ -3167,8 +3750,7 @@ def s_final():
     pct = earned / possible * 100 if possible else 0
     kpi_row(
         [
-            ("Slides", "16"),
-            ("Exam Questions", str(len(EXAM_QUESTIONS))),
+            ("Exam Sets", str(len(st.session_state.exam_bank or {}))),
             ("Your Score", f"{earned} / {possible}"),
             ("Completion", f"{pct:.0f}%"),
         ]
@@ -3193,15 +3775,20 @@ def s_final():
 
 
 # ==============================================================================
-# AUTH GATE
+# AUTH GATE  (with URL-token restore so refresh does not log you out)
 # ==============================================================================
+_restore_session_from_url()
+
 if not st.session_state.authenticated:
     login_page()
     st.stop()
 
+# At this point the user is authenticated — safe to initialise app modules
+init_posts_state()
+
 
 # ==============================================================================
-# SLIDE REGISTRY  (built after login, so the role is known)
+# SLIDE REGISTRY
 # ==============================================================================
 SLIDES = [
     ("Title", s_title),
@@ -3227,10 +3814,16 @@ _user_role = (st.session_state.user or {}).get("role")
 if _user_role in ADMIN_ROLES:
     SLIDES.append(("16. Exam Submissions (Admin)", s_submissions))
 
-if _user_role == "super_admin":
-    SLIDES.append(("17. Admin Management (Super Admin)", s_admin_management))
+if _user_role in ("admin", "super_admin"):
+    SLIDES.append(("17. Exam & Question Management", s_question_management))
 
-# guard: clamp slide index after login/logout
+if _user_role == "super_admin":
+    SLIDES.append(("18. Admin Management (Super Admin)", s_admin_management))
+
+SLIDES.append(("📚 Standards & Blog", s_posts_hub))
+if _user_role in ("admin", "super_admin"):
+    SLIDES.append(("19. Post Management", s_posts_management))
+
 if st.session_state.slide >= len(SLIDES):
     st.session_state.slide = 0
 
@@ -3279,7 +3872,7 @@ with st.sidebar:
     if st.session_state.exam_submitted:
         ex_total = len(st.session_state.exam_results)
         ex_pct = st.session_state.exam_score / ex_total * 100 if ex_total else 0
-        exam_state = "PASSED" if ex_pct >= EXAM_CONFIG["pass_mark"] * 100 else "NOT PASSED"
+        exam_state = "PASSED" if ex_pct >= _active_pass_mark() * 100 else "NOT PASSED"
         st.markdown(
             f'<div style="background:rgba(255,255,255,.10);border-radius:8px;padding:7px 10px;margin-bottom:8px;'
             f'font-size:.72rem;">Exam: <b>{st.session_state.exam_score}/{ex_total}</b> · {exam_state}</div>',
@@ -3300,6 +3893,8 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🚪 Sign out", key="logout_btn"):
+        # Invalidate the persisted token first
+        _clear_session_token()
         for k in list(_defaults.keys()):
             st.session_state.pop(k, None)
         for key in list(st.session_state.keys()):
@@ -3307,17 +3902,17 @@ with st.sidebar:
                 st.session_state.pop(key, None)
         st.rerun()
 
-    if st.button("🔄 Reset everything", key="global_reset"):
-        st.session_state.scores = {}
-        st.session_state.dev_checklist = {}
-        st.session_state.final_checklist = {}
-        st.session_state.scenario_state = {}
-        st.session_state.pr_selected = set()
-        st.session_state.review_selected = set()
-        st.session_state.wf_clicked = []
-        st.session_state.celebrated = {"dev": False, "final": False}
-        _reset_exam()
-        st.rerun()
+    # if st.button("🔄 Reset everything", key="global_reset"):
+    #     st.session_state.scores = {}
+    #     st.session_state.dev_checklist = {}
+    #     st.session_state.final_checklist = {}
+    #     st.session_state.scenario_state = {}
+    #     st.session_state.pr_selected = set()
+    #     st.session_state.review_selected = set()
+    #     st.session_state.wf_clicked = []
+    #     st.session_state.celebrated = {"dev": False, "final": False}
+    #     _reset_exam()
+    #     st.rerun()
 
 
 # ==============================================================================
